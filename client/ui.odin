@@ -2,11 +2,19 @@ package client
 
 import rl "vendor:raylib"
 
-pad_rect :: proc(r: Rect, padding: Vec2) -> (result: Rect) {
+expand_rect :: proc(r: Rect, padding: Vec2) -> (result: Rect) {
 	result.x = r.x - padding.x
 	result.y = r.y - padding.y
 	result.width = r.width + padding.x * 2
 	result.height = r.height + padding.y * 2
+	return result
+}
+
+shrink_rect :: proc(r: Rect, padding: Vec2) -> (result: Rect) {
+	result.x = r.x + padding.x
+	result.y = r.y + padding.y
+	result.width = r.width - padding.x * 2
+	result.height = r.height - padding.y * 2
 	return result
 }
 
