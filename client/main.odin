@@ -17,6 +17,7 @@ WINDOW_TITLE :: "Yutnori"
 
 MIN_PLAYER_COUNT :: 2
 MAX_PLAYER_COUNT :: 6
+PIECE_COUNT :: 4
 
 Screen_State :: enum {
 	MainMenu,
@@ -25,11 +26,22 @@ Screen_State :: enum {
 	GamePlay,
 }
 
+Piece :: struct {
+	at_start: bool,
+	cell:     Cell_ID,
+}
+
+Player_State :: struct {
+	pieces: [PIECE_COUNT]Piece,
+}
+
 Game_State :: struct {
-	screen_state:   Screen_State,
-	player_count:   i32,
-	is_paused:      bool,
-	cell_positions: [Cell_ID]Vec2,
+	screen_state:      Screen_State,
+	player_count:      i32,
+	is_paused:         bool,
+	cell_positions:    [Cell_ID]Vec2,
+	players:           [MAX_PLAYER_COUNT]Player_State,
+	player_turn_index: u32,
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -41,6 +53,14 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 
 reset_game_state :: proc(game_state: ^Game_State) {
 	game_state.player_count = MIN_PLAYER_COUNT
+	game_state.player_turn_index = 0
+	for i in 0 ..< MAX_PLAYER_COUNT {
+		p := &game_state.players[i]
+		for j in 0 ..< PIECE_COUNT {
+			p.pieces[j].at_start = true
+			p.pieces[j].cell = .BottomRightCorner
+		}
+	}
 	game_state.is_paused = false
 }
 
@@ -67,17 +87,20 @@ main :: proc() {
 		}
 	}
 
-	rl.ConfigFlags({.VSYNC_HINT, .WINDOW_RESIZABLE, .MSAA_4X_HINT})
+
+	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_RESIZABLE, .MSAA_4X_HINT})
 	rl.SetTargetFPS(500)
 
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
 	defer rl.CloseWindow()
 
-	rl.SetWindowState({.WINDOW_RESIZABLE})
 	rl.SetWindowMinSize(320, 240)
 
 	game_state := init_game()
 	defer free(game_state, context.allocator)
+
+	font := rl.GetFontDefault()
+	// rl.SetTextureFilter(font.texture, .BILINEAR)
 
 	default_style := UI_Style {
 		font         = rl.GetFontDefault(),
@@ -92,7 +115,7 @@ main :: proc() {
 	)
 
 	// @Temprary
-	game_state.screen_state = .GamePlay
+	// game_state.screen_state = .GamePlay
 
 	running := true
 
@@ -224,29 +247,29 @@ main :: proc() {
 			offset_y := f32(0)
 
 			// draw top section
-			{
-				if game_state.is_paused {
-					rl.GuiDisable()
-				}
+			// {
+			// 	if game_state.is_paused {
+			// 		rl.GuiDisable()
+			// 	}
 
-				text := rl.GuiIconText(.ICON_BURGER_MENU, "")
-				size := rl.MeasureTextEx(
-					default_style.font,
-					text,
-					default_style.font_size,
-					default_style.font_spacing,
-				)
+			// 	text := rl.GuiIconText(.ICON_BURGER_MENU, "")
+			// 	size := rl.MeasureTextEx(
+			// 		default_style.font,
+			// 		text,
+			// 		default_style.font_size,
+			// 		default_style.font_spacing,
+			// 	)
 
-				margin := min(screen_size.x * 0.005, screen_size.y * 0.005)
+			// 	margin := min(screen_size.x * 0.005, screen_size.y * 0.005)
 
-				if rl.GuiButton(Rect{margin, margin, size.y, size.y}, text) {
-					game_state.is_paused = true
-				}
+			// 	if rl.GuiButton(Rect{margin, margin, size.y, size.y}, text) {
+			// 		game_state.is_paused = true
+			// 	}
 
-				rl.GuiEnable()
+			// 	rl.GuiEnable()
 
-				offset_y += size.y + margin
-			}
+			// 	offset_y += size.y + margin
+			// }
 
 			// draw game board
 			{
@@ -348,32 +371,18 @@ main :: proc() {
 					}
 				}
 
-				for id in Cell_ID {
-					radius := small_circle_radius
-					if id == .Center ||
-					   id == .TopLeftCorner ||
-					   id == .TopRightCorner ||
-					   id == .BottomLeftCorner ||
-					   id == .BottomRightCorner {
-						radius = big_circle_radius
-					}
-					rl.DrawCircleV(game_state.cell_positions[id], radius, color)
+				for cell in Cell_ID {
+					radius := select_cell_radius(cell, small_circle_radius, big_circle_radius)
+					rl.DrawCircleV(game_state.cell_positions[cell], radius, color)
 				}
 
 				mouse := rl.GetMousePosition()
 				selected_cell := -1
-				for id in Cell_ID {
-					pos := game_state.cell_positions[id]
-					radius := small_circle_radius
-					if id == .Center ||
-					   id == .TopLeftCorner ||
-					   id == .TopRightCorner ||
-					   id == .BottomLeftCorner ||
-					   id == .BottomRightCorner {
-						radius = big_circle_radius
-					}
+				for cell in Cell_ID {
+					pos := game_state.cell_positions[cell]
+					radius := select_cell_radius(cell, small_circle_radius, big_circle_radius)
 					if rl.CheckCollisionPointCircle(mouse, pos, radius) {
-						selected_cell = int(id)
+						selected_cell = int(cell)
 						break
 					}
 				}
@@ -388,7 +397,7 @@ main :: proc() {
 
 					starting := true
 					move_count := 5
-					seq, win := get_move_sequance(start_cell, u32(move_count), starting)
+					seq, finish := get_move_sequance(start_cell, u32(move_count), starting)
 					for item in seq {
 						radius := select_cell_radius(item, small_circle_radius, big_circle_radius)
 						pos := game_state.cell_positions[item]
@@ -411,7 +420,7 @@ main :: proc() {
 
 					{
 						name, _ := reflect.enum_name_from_value(start_cell)
-						text := fmt.ctprintf("name: %v win: %v", name, win)
+						text := fmt.ctprintf("cell: %v\nfinish: %v", name, finish)
 						pos := mouse
 						pos.y += 24
 						rl.DrawTextEx(
@@ -422,6 +431,113 @@ main :: proc() {
 							default_style.font_spacing,
 							rl.WHITE,
 						)
+					}
+				}
+
+				piece_size := min(screen_size.x * 0.05, screen_size.y * 0.05)
+				piece_spacing := screen_size.x * 0.005
+				total_width := piece_size * PIECE_COUNT + (PIECE_COUNT - 1) * piece_spacing
+
+				// Drawing Left Players
+				{
+					offset := Vec2 {
+						screen_size.x * 0.25 * 0.5 - total_width * 0.5,
+						screen_size.y / f32(MAX_PLAYER_COUNT / 2) * 0.5,
+					}
+
+					for i := i32(0); i < game_state.player_count; i += 2 {
+						text := fmt.ctprintf("P%v", i + 1)
+						size := rl.MeasureTextEx(
+							default_style.font,
+							text,
+							default_style.font_size,
+							default_style.font_spacing,
+						)
+						pos := offset
+						pos.x += total_width * 0.5 - size.x * 0.5
+						rl.DrawTextEx(
+							default_style.font,
+							text,
+							pos,
+							default_style.font_size,
+							default_style.font_spacing,
+							rl.WHITE,
+						)
+
+						offset.y += size.y + screen_size.y * 0.005
+						player := game_state.players[i]
+						for i in 0 ..< PIECE_COUNT {
+							piece := player.pieces[i]
+							if piece.at_start {
+								pos := Vec2{f32(i) * (piece_size + piece_spacing), 0}
+								rl.DrawRectangleV(
+									offset + pos,
+									Vec2{piece_size, piece_size},
+									rl.WHITE,
+								)
+							} else {
+								pos := game_state.cell_positions[piece.cell]
+								rl.DrawRectangleV(
+									pos - Vec2{piece_size, piece_size} * 0.5,
+									Vec2{piece_size, piece_size},
+									rl.WHITE,
+								)
+							}
+						}
+
+						offset.y += screen_size.y / f32(MAX_PLAYER_COUNT / 2) * 0.5
+					}
+				}
+
+
+				// Drawing Right Players
+				{
+					offset := Vec2 {
+						screen_size.x * 0.75 + screen_size.x * 0.25 * 0.5 - total_width * 0.5,
+						screen_size.y / f32(MAX_PLAYER_COUNT / 2) * 0.5,
+					}
+
+					for i := i32(1); i < game_state.player_count; i += 2 {
+						text := fmt.ctprintf("P%v", i + 1)
+						size := rl.MeasureTextEx(
+							default_style.font,
+							text,
+							default_style.font_size,
+							default_style.font_spacing,
+						)
+						pos := offset
+						pos.x += total_width * 0.5 - size.x * 0.5
+						rl.DrawTextEx(
+							default_style.font,
+							text,
+							pos,
+							default_style.font_size,
+							default_style.font_spacing,
+							rl.WHITE,
+						)
+
+						offset.y += size.y + screen_size.y * 0.005
+						player := game_state.players[i]
+						for i in 0 ..< PIECE_COUNT {
+							piece := player.pieces[i]
+							if piece.at_start {
+								pos := Vec2{f32(i) * (piece_size + piece_spacing), 0}
+								rl.DrawRectangleV(
+									offset + pos,
+									Vec2{piece_size, piece_size},
+									rl.WHITE,
+								)
+							} else {
+								pos := game_state.cell_positions[piece.cell]
+								rl.DrawRectangleV(
+									pos - Vec2{piece_size, piece_size} * 0.5,
+									Vec2{piece_size, piece_size},
+									rl.WHITE,
+								)
+							}
+						}
+
+						offset.y += screen_size.y / f32(MAX_PLAYER_COUNT / 2) * 0.5
 					}
 				}
 			}
