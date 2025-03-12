@@ -344,51 +344,11 @@ main :: proc() {
 				game_state.is_paused = !game_state.is_paused
 			}
 
-			screen_size := Vec2{f32(rl.GetRenderWidth()), f32(rl.GetRenderHeight())}
-
-			draw_state := &game_state.draw_state
-			draw_state.screen_size = screen_size
-
-			piece_size := min(screen_size.x, screen_size.y) * 0.05
-			draw_state.piece_size = Vec2{piece_size, piece_size}
-
-			draw_state.top_rect = Rect{0, 0, screen_size.x, screen_size.y * 0.1}
-
-			{
-				padding := min(screen_size.x * 0.1, screen_size.y * 0.1)
-				size := Vec2{screen_size.x * 0.5, screen_size.y * 0.9}
-				board_rect := Rect {
-					screen_size.x * 0.5 - size.x * 0.5,
-					screen_size.y * 0.1,
-					size.x,
-					size.y,
-				}
-				board_rect = shrink_rect(board_rect, padding)
-				draw_state.board_rect = board_rect
-			}
-
-			draw_state.bottom_rect = Rect {
-				screen_size.y * 0.9,
-				0,
-				screen_size.x,
-				screen_size.y * 0.1,
-			}
-
-			draw_state.left_players_rect = Rect {
-				0,
-				screen_size.y * 0.1,
-				screen_size.x * 0.25,
-				screen_size.y * 0.9,
-			}
-			draw_state.right_players_rect = Rect {
-				screen_size.x * 0.75,
-				screen_size.y * 0.1,
-				screen_size.x * 0.25,
-				screen_size.y * 0.9,
-			}
+			update_draw_state(game_state)
+			draw_state := game_state.draw_state
+			piece_size := draw_state.piece_size
 
 			game_state.moves = make([dynamic]Move, context.temp_allocator)
-
 			if len(game_state.rolls) != 0 &&
 			   game_state.selected_piece_index != -1 &&
 			   !game_state.can_roll {
@@ -422,13 +382,13 @@ main :: proc() {
 						for move in game_state.moves {
 							pos := draw_state.cell_positions[move.cell]
 							if move.finish {
-								pos += Vec2{piece_size, piece_size} * 0.5
+								pos += piece_size * 0.5
 								pos.x += finish_offset
-								finish_offset += piece_size * 0.1
+								finish_offset += piece_size.x * 0.1
 							} else {
-								pos -= Vec2{piece_size, piece_size} * 0.5
+								pos -= piece_size * 0.5
 							}
-							r := Rect{pos.x, pos.y, piece_size, piece_size}
+							r := Rect{pos.x, pos.y, piece_size.x, piece_size.y}
 							if rl.CheckCollisionPointRec(rl.GetMousePosition(), r) &&
 							   rl.IsMouseButtonPressed(.LEFT) {
 								should_move = true
@@ -488,6 +448,7 @@ main :: proc() {
 						if finished_pieces_count == game_state.player_count {
 							game_state.player_won_index = auto_cast game_state.player_turn_index
 						}
+
 						break
 					}
 				}
@@ -501,161 +462,197 @@ main :: proc() {
 				game_state.can_roll = true
 			}
 
-			// calculate game board positions
-			{
-				points := get_anchors_from_rect(draw_state.board_rect)
-				draw_state.cell_positions[.BottomRightCorner] = points.bottom_right
-				draw_state.cell_positions[.TopRightCorner] = points.top_right
-				draw_state.cell_positions[.TopLeftCorner] = points.top_left
-				draw_state.cell_positions[.BottomLeftCorner] = points.bottom_left
-				draw_state.cell_positions[.Center] = points.center
+			draw(game_state, default_style)
 
-				// Vertical
+			if game_state.is_paused {
+				rl.DrawRectangleRec(screen_rect, {0, 0, 0, 128})
+
+				spacing := 0.005 * screen_size.y
+				layout := begin_vertical_layout(spacing)
+				layout.style = default_style
+
+				padding := Vec2{0.01, 0.01} * screen_size
+				resume_id := push_widget(&layout, "RESUME", padding)
+				options_id := push_widget(&layout, "OPTIONS", padding)
+				main_menu_id := push_widget(&layout, "MAIN MENU", padding)
+				end_vertical_layout(&layout, ui_points.center)
+
 				{
-					step := draw_state.board_rect.height / (SIDE_CELL_COUNT + 1)
-					for i in 0 ..< SIDE_CELL_COUNT {
-						p := points.bottom_right
-						p.y -= f32(i + 1) * step
-						draw_state.cell_positions[Cell_ID.Right0 + Cell_ID(i)] = p
-					}
-					for i in 0 ..< SIDE_CELL_COUNT {
-						p := points.top_left
-						p.y += f32(i + 1) * step
-						draw_state.cell_positions[Cell_ID.Left0 + Cell_ID(i)] = p
+					w := get_widget(layout, resume_id)
+					if rl.GuiButton(w.rect, w.text) {
+						game_state.is_paused = false
 					}
 				}
 
-				// Horizontal
 				{
-					step := draw_state.board_rect.width / (SIDE_CELL_COUNT + 1)
-					for i in 0 ..< SIDE_CELL_COUNT {
-						p := points.top_right
-						p.x -= f32(i + 1) * step
-						draw_state.cell_positions[Cell_ID.Top0 + Cell_ID(i)] = p
-					}
-					for i in 0 ..< SIDE_CELL_COUNT {
-						p := points.bottom_left
-						p.x += f32(i + 1) * step
-						draw_state.cell_positions[Cell_ID.Bottom0 + Cell_ID(i)] = p
+					w := get_widget(layout, options_id)
+					if rl.GuiButton(w.rect, w.text) {
 					}
 				}
 
-				// Main Diag
 				{
-					p0 := points.top_left
-					p1 := points.bottom_right
-
-					p0_to_center := points.center - p0
-					step0 := linalg.length(p0_to_center) / 3
-					dir := linalg.normalize(p0_to_center)
-					for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
-						draw_state.cell_positions[.MainDiagonal0 + Cell_ID(i)] =
-							p0 + dir * f32(i + 1) * step0
-
-					}
-
-					center_to_p1 := p1 - points.center
-					step1 := linalg.length(center_to_p1) / 3
-					for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
-						draw_state.cell_positions[.MainDiagonal2 + Cell_ID(i)] =
-							points.center + dir * f32(i + 1) * step0
-
-					}
-				}
-
-				// Anti Diag
-				{
-					p0 := points.top_right
-					p1 := points.bottom_left
-
-					p0_to_center := points.center - p0
-					step0 := linalg.length(p0_to_center) / 3
-					dir := linalg.normalize(p0_to_center)
-					for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
-						draw_state.cell_positions[.AntiDiagonal0 + Cell_ID(i)] =
-							p0 + dir * f32(i + 1) * step0
-
-					}
-
-					center_to_p1 := p1 - points.center
-					step1 := linalg.length(center_to_p1) / 3
-					for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
-						draw_state.cell_positions[.AntiDiagonal2 + Cell_ID(i)] =
-							points.center + dir * f32(i + 1) * step0
-
-					}
-				}
-
-				if game_state.is_paused {
-					rl.DrawRectangleRec(screen_rect, {0, 0, 0, 128})
-
-					spacing := 0.005 * screen_size.y
-					layout := begin_vertical_layout(spacing)
-					layout.style = default_style
-
-					padding := Vec2{0.01, 0.01} * screen_size
-					resume_id := push_widget(&layout, "RESUME", padding)
-					options_id := push_widget(&layout, "OPTIONS", padding)
-					main_menu_id := push_widget(&layout, "MAIN MENU", padding)
-					end_vertical_layout(&layout, ui_points.center)
-
-					{
-						w := get_widget(layout, resume_id)
-						if rl.GuiButton(w.rect, w.text) {
-							game_state.is_paused = false
-						}
-					}
-
-					{
-						w := get_widget(layout, options_id)
-						if rl.GuiButton(w.rect, w.text) {
-						}
-					}
-
-					{
-						w := get_widget(layout, main_menu_id)
-						if rl.GuiButton(w.rect, w.text) {
-							reset_game_state(game_state)
-							game_state.screen_state = .MainMenu
-						}
-					}
-				}
-
-				if game_state.player_won_index != -1 {
-					rl.DrawRectangleRec(screen_rect, {0, 0, 0, 128})
-
-					spacing := 0.005 * screen_size.y
-					layout := begin_vertical_layout(spacing)
-					layout.style = default_style
-
-					padding := Vec2{0.01, 0.01} * screen_size
-					player_won_id := push_widget(
-						&layout,
-						fmt.ctprintf("P%d WON", game_state.player_won_index + 1),
-						padding,
-					)
-					main_menu_id := push_widget(&layout, "MAIN MENU", padding)
-					end_vertical_layout(&layout, ui_points.center)
-
-					{
-						w := get_widget(layout, player_won_id)
-						rl.GuiLabel(w.rect, w.text)
-					}
-
-					{
-						w := get_widget(layout, main_menu_id)
-						if rl.GuiButton(w.rect, w.text) {
-							reset_game_state(game_state)
-							game_state.screen_state = .MainMenu
-						}
+					w := get_widget(layout, main_menu_id)
+					if rl.GuiButton(w.rect, w.text) {
+						reset_game_state(game_state)
+						game_state.screen_state = .MainMenu
 					}
 				}
 			}
 
-			draw(game_state, default_style)
+			if game_state.player_won_index != -1 {
+				rl.DrawRectangleRec(screen_rect, {0, 0, 0, 128})
+
+				spacing := 0.005 * screen_size.y
+				layout := begin_vertical_layout(spacing)
+				layout.style = default_style
+
+				padding := Vec2{0.01, 0.01} * screen_size
+				player_won_id := push_widget(
+					&layout,
+					fmt.ctprintf("P%d WON", game_state.player_won_index + 1),
+					padding,
+				)
+				main_menu_id := push_widget(&layout, "MAIN MENU", padding)
+				end_vertical_layout(&layout, ui_points.center)
+
+				{
+					w := get_widget(layout, player_won_id)
+					rl.GuiLabel(w.rect, w.text)
+				}
+
+				{
+					w := get_widget(layout, main_menu_id)
+					if rl.GuiButton(w.rect, w.text) {
+						reset_game_state(game_state)
+						game_state.screen_state = .MainMenu
+					}
+				}
+			}
 		}
 
 		rl.EndDrawing()
+	}
+}
+
+update_draw_state :: proc(game_state: ^Game_State) {
+	screen_size := Vec2{f32(rl.GetRenderWidth()), f32(rl.GetRenderHeight())}
+
+	draw_state := &game_state.draw_state
+	draw_state.screen_size = screen_size
+
+	piece_size := min(screen_size.x, screen_size.y) * 0.05
+	draw_state.piece_size = Vec2{piece_size, piece_size}
+
+	draw_state.top_rect = Rect{0, 0, screen_size.x, screen_size.y * 0.1}
+
+	{
+		padding := min(screen_size.x * 0.1, screen_size.y * 0.1)
+		size := Vec2{screen_size.x * 0.5, screen_size.y * 0.9}
+		board_rect := Rect{screen_size.x * 0.5 - size.x * 0.5, screen_size.y * 0.1, size.x, size.y}
+		board_rect = shrink_rect(board_rect, padding)
+		draw_state.board_rect = board_rect
+	}
+
+	draw_state.bottom_rect = Rect{screen_size.y * 0.9, 0, screen_size.x, screen_size.y * 0.1}
+
+	draw_state.left_players_rect = Rect {
+		0,
+		screen_size.y * 0.1,
+		screen_size.x * 0.25,
+		screen_size.y * 0.9,
+	}
+	draw_state.right_players_rect = Rect {
+		screen_size.x * 0.75,
+		screen_size.y * 0.1,
+		screen_size.x * 0.25,
+		screen_size.y * 0.9,
+	}
+
+
+	// calculate game board positions
+	{
+		points := get_anchors_from_rect(draw_state.board_rect)
+		draw_state.cell_positions[.BottomRightCorner] = points.bottom_right
+		draw_state.cell_positions[.TopRightCorner] = points.top_right
+		draw_state.cell_positions[.TopLeftCorner] = points.top_left
+		draw_state.cell_positions[.BottomLeftCorner] = points.bottom_left
+		draw_state.cell_positions[.Center] = points.center
+
+		// Vertical
+		{
+			step := draw_state.board_rect.height / (SIDE_CELL_COUNT + 1)
+			for i in 0 ..< SIDE_CELL_COUNT {
+				p := points.bottom_right
+				p.y -= f32(i + 1) * step
+				draw_state.cell_positions[Cell_ID.Right0 + Cell_ID(i)] = p
+			}
+			for i in 0 ..< SIDE_CELL_COUNT {
+				p := points.top_left
+				p.y += f32(i + 1) * step
+				draw_state.cell_positions[Cell_ID.Left0 + Cell_ID(i)] = p
+			}
+		}
+
+		// Horizontal
+		{
+			step := draw_state.board_rect.width / (SIDE_CELL_COUNT + 1)
+			for i in 0 ..< SIDE_CELL_COUNT {
+				p := points.top_right
+				p.x -= f32(i + 1) * step
+				draw_state.cell_positions[Cell_ID.Top0 + Cell_ID(i)] = p
+			}
+			for i in 0 ..< SIDE_CELL_COUNT {
+				p := points.bottom_left
+				p.x += f32(i + 1) * step
+				draw_state.cell_positions[Cell_ID.Bottom0 + Cell_ID(i)] = p
+			}
+		}
+
+		// Main Diag
+		{
+			p0 := points.top_left
+			p1 := points.bottom_right
+
+			p0_to_center := points.center - p0
+			step0 := linalg.length(p0_to_center) / 3
+			dir := linalg.normalize(p0_to_center)
+			for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
+				draw_state.cell_positions[.MainDiagonal0 + Cell_ID(i)] =
+					p0 + dir * f32(i + 1) * step0
+
+			}
+
+			center_to_p1 := p1 - points.center
+			step1 := linalg.length(center_to_p1) / 3
+			for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
+				draw_state.cell_positions[.MainDiagonal2 + Cell_ID(i)] =
+					points.center + dir * f32(i + 1) * step0
+
+			}
+		}
+
+		// Anti Diag
+		{
+			p0 := points.top_right
+			p1 := points.bottom_left
+
+			p0_to_center := points.center - p0
+			step0 := linalg.length(p0_to_center) / 3
+			dir := linalg.normalize(p0_to_center)
+			for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
+				draw_state.cell_positions[.AntiDiagonal0 + Cell_ID(i)] =
+					p0 + dir * f32(i + 1) * step0
+
+			}
+
+			center_to_p1 := p1 - points.center
+			step1 := linalg.length(center_to_p1) / 3
+			for i := 0; i < SIDE_CELL_COUNT / 2; i += 1 {
+				draw_state.cell_positions[.AntiDiagonal2 + Cell_ID(i)] =
+					points.center + dir * f32(i + 1) * step0
+
+			}
+		}
 	}
 }
 
