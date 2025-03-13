@@ -64,8 +64,15 @@ Draw_State :: struct {
 Action :: enum {
 	Unready,
 	Ready,
+	GameStarted,
+	GameEnded,
 	BeginTurn,
 	EndTurn,
+	BeginRoll,
+	EndRoll,
+	BeginMove,
+	EndMove,
+	Ticking,
 }
 
 Game_State :: struct {
@@ -75,12 +82,12 @@ Game_State :: struct {
 	piece_count:          i32,
 	player_count:         i32,
 	players:              [dynamic]Player_State,
-	player_turn_index:    u32,
+	player_turn_index:    i32,
 	player_won_index:     i32,
 	rolls:                [dynamic]i32,
-	moves:                [dynamic]Move,
-	can_roll:             bool,
 	selected_piece_index: i32,
+	current_action:       Action,
+	should_roll:          bool,
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -125,17 +132,18 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	resize(&game_state.rolls, 0)
 	game_state.is_paused = false
 	game_state.selected_piece_index = -1
-	game_state.can_roll = true
+	game_state.current_action = .Unready
+	game_state.should_roll = false
 }
 
-roll :: proc(game_state: ^Game_State) {
-	if !game_state.can_roll do return
-	player := game_state.players[game_state.player_turn_index]
+roll :: proc(game_state: ^Game_State) -> i32 {
 	n := rand.int31_max(7) - 1
-	if n != 4 && n != 5 {
-		game_state.can_roll = false
-	}
 	should_append := true
+	if n == 0 {
+		should_append = false
+		resize(&game_state.rolls, 0)
+	}
+	player := game_state.players[game_state.player_turn_index]
 	all_pieces_at_start := true
 	for piece in player.pieces {
 		if !is_piece_at_start(piece) {
@@ -143,16 +151,38 @@ roll :: proc(game_state: ^Game_State) {
 			break
 		}
 	}
-	if n == 0 {
-		should_append = false
-		resize(&game_state.rolls, 0)
-	}
 	if n == -1 && all_pieces_at_start && len(game_state.rolls) == 0 {
 		should_append = false
 	}
 	if should_append {
 		append(&game_state.rolls, n)
 	}
+	return n
+}
+
+get_player_moves :: proc(
+	game_state: ^Game_State,
+	allocator := context.temp_allocator,
+) -> [dynamic]Move {
+	if game_state.selected_piece_index == -1 do return nil
+	player := game_state.players[game_state.player_turn_index]
+	piece := player.pieces[game_state.selected_piece_index]
+	moves := make([dynamic]Move, allocator)
+	for roll, roll_idx in game_state.rolls {
+		if roll == -1 {
+			if !is_piece_at_start(piece) {
+				back0, back1 := get_prev_cell(piece.cell)
+				append(&moves, Move{roll, back0, false})
+				if back1 != back0 {
+					append(&moves, Move{roll, back1, false})
+				}
+			}
+		} else {
+			path, end := get_move_sequance(piece.cell, u32(roll), is_piece_at_start(piece))
+			append(&moves, Move{roll, path[len(path) - 1], end})
+		}
+	}
+	return moves
 }
 
 main :: proc() {
@@ -358,82 +388,100 @@ main :: proc() {
 			draw_state := game_state.draw_state
 			piece_size := draw_state.piece_size
 
-			if rl.IsKeyPressed(.Q) {
-				game_state.selected_piece_index = -1
-			}
+			switch game_state.current_action {
+			case .Unready:
+				fmt.println("players are unready")
+				game_state.current_action = .Ready
+			case .Ready:
+				fmt.println("players are ready")
+				game_state.current_action = .GameStarted
+			case .GameStarted:
+				fmt.println("game started")
+				game_state.player_turn_index = rand.int31_max(game_state.player_count)
+				game_state.current_action = .BeginTurn
+			case .GameEnded:
+				fmt.printf("game ended p%d won\n", game_state.player_won_index + 1)
+			case .BeginTurn:
+				fmt.printf("p%v's turn\n", game_state.player_turn_index + 1)
+				game_state.current_action = .BeginRoll
+			case .EndTurn:
+				fmt.println("end turn")
+				game_state.player_turn_index += 1
+				game_state.player_turn_index %= game_state.player_count
+				game_state.current_action = .BeginTurn
+			case .BeginRoll:
+				if game_state.should_roll {
+					game_state.should_roll = false
+					n := roll(game_state)
+					fmt.printf("begin roll: %d\n", n)
+					game_state.current_action = .EndRoll
+				}
+			case .EndRoll:
+				fmt.println("end roll")
+				roll_count := len(game_state.rolls)
+				if roll_count == 0 {
+					game_state.current_action = .EndTurn
+				} else if game_state.rolls[roll_count - 1] == 4 ||
+				   game_state.rolls[roll_count - 1] == 5 {
+					game_state.current_action = .BeginRoll
+				} else {
+					game_state.current_action = .Ticking
+				}
+			case .BeginMove:
+				fmt.println("begin move")
+			case .EndMove:
+				fmt.println("end move")
+			case .Ticking:
+				fmt.println("ticking")
 
-			game_state.moves = make([dynamic]Move, context.temp_allocator)
-			moved := false
+				if rl.IsKeyPressed(.Q) {
+					game_state.selected_piece_index = -1
+				}
 
-			if len(game_state.rolls) != 0 &&
-			   game_state.selected_piece_index != -1 &&
-			   !game_state.can_roll {
+				moved_this_frame := false
+				if len(game_state.rolls) == 0 {
+					game_state.current_action = .EndTurn
+					break
+				}
+
+				moves := get_player_moves(game_state)
 				player := &game_state.players[game_state.player_turn_index]
-				for roll, roll_idx in game_state.rolls {
-					piece_to_move := player.pieces[game_state.selected_piece_index]
-					if roll == -1 {
-						if !is_piece_at_start(piece_to_move) {
-							back0, back1 := get_prev_cell(piece_to_move.cell)
-							append(&game_state.moves, Move{roll, back0, false})
-							if back1 != back0 {
-								append(&game_state.moves, Move{roll, back1, false})
-							}
-						}
+				finish_offset := f32(0)
+				for move in moves {
+					pos := draw_state.cell_positions[move.cell]
+					if move.finish {
+						pos += piece_size * 0.5
+						pos.x += finish_offset
+						finish_offset += piece_size.x * 0.1
 					} else {
-						path, end := get_move_sequance(
-							piece_to_move.cell,
-							u32(roll),
-							is_piece_at_start(piece_to_move),
-						)
-						append(&game_state.moves, Move{roll, path[len(path) - 1], end})
+						pos -= piece_size * 0.5
 					}
-					should_move := false
-					target_move := Move{}
-					if !game_state.is_paused && game_state.player_won_index == -1 {
-						finish_count := 0
-						for move in game_state.moves {
-							if move.finish do finish_count += 1
-						}
-						finish_offset := f32(0)
-						for move in game_state.moves {
-							pos := draw_state.cell_positions[move.cell]
-							if move.finish {
-								pos += piece_size * 0.5
-								pos.x += finish_offset
-								finish_offset += piece_size.x * 0.1
-							} else {
-								pos -= piece_size * 0.5
-							}
-							r := Rect{pos.x, pos.y, piece_size.x, piece_size.y}
-							if rl.CheckCollisionPointRec(rl.GetMousePosition(), r) &&
-							   rl.IsMouseButtonPressed(.LEFT) {
-								should_move = true
-								moved = true
-								target_move = move
-								break
-							}
-						}
+					r := Rect{pos.x, pos.y, piece_size.x, piece_size.y}
+					if rl.CheckCollisionPointRec(rl.GetMousePosition(), r) &&
+					   rl.IsMouseButtonPressed(.LEFT) {
+						moved_this_frame = true
 					}
-					if should_move {
+					if moved_this_frame {
 						for player_idx in 0 ..< game_state.player_count {
 							player_state := &game_state.players[player_idx]
 							for piece_idx in 0 ..< game_state.piece_count {
 								piece := player_state.pieces[piece_idx]
 								if piece.finished do continue
-								if piece.cell == target_move.cell &&
+								if piece.cell == move.cell &&
 								   !piece.finished &&
 								   !is_piece_at_start(piece) &&
 								   player_idx != i32(game_state.player_turn_index) {
 									piece.cell = .BottomRightCorner
-									game_state.can_roll = true
+									game_state.current_action = .BeginRoll
 								}
 								player_state.pieces[piece_idx] = piece
 							}
 						}
 
+						piece_to_move := player.pieces[game_state.selected_piece_index]
 						if is_piece_at_start(piece_to_move) {
-							piece_to_move.finished = target_move.finish
-							piece_to_move.cell = target_move.cell
+							piece_to_move.finished = move.finish
+							piece_to_move.cell = move.cell
 							player.pieces[game_state.selected_piece_index] = piece_to_move
 						} else {
 							for player_idx in 0 ..< game_state.player_count {
@@ -443,8 +491,8 @@ main :: proc() {
 									if piece.finished do continue
 									if piece.cell == piece_to_move.cell &&
 									   player_idx == i32(game_state.player_turn_index) {
-										piece.cell = target_move.cell
-										piece.finished = target_move.finish
+										piece.cell = move.cell
+										piece.finished = move.finish
 									}
 									player_state.pieces[piece_idx] = piece
 								}
@@ -452,7 +500,15 @@ main :: proc() {
 						}
 
 						game_state.selected_piece_index = -1
-						ordered_remove(&game_state.rolls, roll_idx)
+						roll_index := -1
+						for roll, idx in game_state.rolls {
+							if roll == move.roll {
+								roll_index = idx
+								break
+							}
+						}
+
+						ordered_remove(&game_state.rolls, roll_index)
 
 						finished_pieces_count := i32(0)
 						for piece_idx in 0 ..< game_state.piece_count {
@@ -465,97 +521,90 @@ main :: proc() {
 
 						if finished_pieces_count == game_state.player_count {
 							game_state.player_won_index = auto_cast game_state.player_turn_index
+							game_state.current_action = .GameEnded
 						}
 
 						break
 					}
 				}
-			}
 
-			// select piece
-			{
-				piece_count := game_state.piece_count
-				total_width :=
-					piece_size.x * f32(piece_count) +
-					(f32(piece_count) - 1) * draw_state.piece_spacing
+				// select piece
+				{
+					piece_count := game_state.piece_count
+					total_width :=
+						piece_size.x * f32(piece_count) +
+						(f32(piece_count) - 1) * draw_state.piece_spacing
 
-				left_side_player_count := game_state.player_count / 2
-				right_side_player_count := game_state.player_count / 2
-				if game_state.player_count % 2 == 1 {
-					left_side_player_count += 1
-				}
-				player_area_height :=
-					f32(default_style.font.baseSize) + screen_size.y * 0.005 + piece_size.y
+					left_side_player_count := game_state.player_count / 2
+					right_side_player_count := game_state.player_count / 2
+					if game_state.player_count % 2 == 1 {
+						left_side_player_count += 1
+					}
+					player_area_height :=
+						f32(default_style.font.baseSize) + screen_size.y * 0.005 + piece_size.y
 
-				left_cursor := Vec2 {
-					draw_state.left_players_rect.x +
-					draw_state.left_players_rect.width * 0.5 -
-					total_width * 0.5,
-					draw_state.left_players_rect.y +
-					(draw_state.left_players_rect.height / f32(left_side_player_count)) * 0.5 -
-					player_area_height * 0.5,
-				}
-
-				right_cursor := Vec2 {
-					draw_state.right_players_rect.x +
-					draw_state.right_players_rect.width * 0.5 -
-					total_width * 0.5,
-					draw_state.right_players_rect.y +
-					(draw_state.right_players_rect.height / f32(right_side_player_count)) * 0.5 -
-					player_area_height * 0.5,
-				}
-
-				for i in 0 ..< game_state.player_count {
-					player := game_state.players[i]
-					belongs_to_player := game_state.player_turn_index == auto_cast i
-
-					text := fmt.ctprintf("P%v", i + 1)
-					size := rl.MeasureTextEx(
-						default_style.font,
-						text,
-						default_style.font_size,
-						default_style.font_spacing,
-					)
-
-					offset: ^Vec2
-
-					if i % 2 == 0 {
-						offset = &left_cursor
-					} else {
-						offset = &right_cursor
+					left_cursor := Vec2 {
+						draw_state.left_players_rect.x +
+						draw_state.left_players_rect.width * 0.5 -
+						total_width * 0.5,
+						draw_state.left_players_rect.y +
+						(draw_state.left_players_rect.height / f32(left_side_player_count)) * 0.5 -
+						player_area_height * 0.5,
 					}
 
-					pos := Vec2{offset.x, offset.y}
-					pos.x += total_width * 0.5 - size.x * 0.5
-					offset.y += size.y + screen_size.y * 0.005
-					for j in 0 ..< game_state.piece_count {
-						piece := &player.pieces[j]
-						if piece.finished do continue
-						piece_rect := get_piece_rect(draw_state, player, j, offset^)
-						hovered := rl.CheckCollisionPointRec(mouse, piece_rect)
-						if hovered &&
-						   belongs_to_player &&
-						   !game_state.can_roll &&
-						   rl.IsMouseButtonPressed(.LEFT) &&
-						   !moved {
-							game_state.selected_piece_index = i32(j)
+					right_cursor := Vec2 {
+						draw_state.right_players_rect.x +
+						draw_state.right_players_rect.width * 0.5 -
+						total_width * 0.5,
+						draw_state.right_players_rect.y +
+						(draw_state.right_players_rect.height / f32(right_side_player_count)) *
+							0.5 -
+						player_area_height * 0.5,
+					}
+
+					for i in 0 ..< game_state.player_count {
+						player := game_state.players[i]
+						belongs_to_player := game_state.player_turn_index == auto_cast i
+
+						text := fmt.ctprintf("P%v", i + 1)
+						size := rl.MeasureTextEx(
+							default_style.font,
+							text,
+							default_style.font_size,
+							default_style.font_spacing,
+						)
+
+						offset: ^Vec2
+
+						if i % 2 == 0 {
+							offset = &left_cursor
+						} else {
+							offset = &right_cursor
+						}
+
+						pos := Vec2{offset.x, offset.y}
+						pos.x += total_width * 0.5 - size.x * 0.5
+						offset.y += size.y + screen_size.y * 0.005
+						for j in 0 ..< game_state.piece_count {
+							piece := &player.pieces[j]
+							if piece.finished do continue
+							piece_rect := get_piece_rect(draw_state, player, j, offset^)
+							hovered := rl.CheckCollisionPointRec(mouse, piece_rect)
+							if hovered &&
+							   belongs_to_player &&
+							   rl.IsMouseButtonPressed(.LEFT) &&
+							   !moved_this_frame {
+								game_state.selected_piece_index = i32(j)
+							}
+						}
+
+						if i % 2 == 0 {
+							offset.y += screen_size.y / f32(left_side_player_count) * 0.5
+						} else {
+							offset.y += screen_size.y / f32(right_side_player_count) * 0.5
 						}
 					}
-
-					if i % 2 == 0 {
-						offset.y += screen_size.y / f32(left_side_player_count) * 0.5
-					} else {
-						offset.y += screen_size.y / f32(right_side_player_count) * 0.5
-					}
 				}
-			}
-
-			if len(game_state.rolls) == 0 &&
-			   game_state.can_roll == false &&
-			   game_state.player_won_index == -1 {
-				game_state.player_turn_index += 1
-				game_state.player_turn_index %= u32(game_state.player_count)
-				game_state.can_roll = true
 			}
 
 			draw(game_state, default_style)
@@ -797,13 +846,14 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 			cursor.y += screen_size.y * 0.01
 			r := Rect{screen_size.x * 0.5 - size.x * 0.5, cursor.y, size.x, size.y}
 
-			if !game_state.can_roll || game_state.is_paused {
+			if game_state.current_action != .BeginRoll || game_state.is_paused {
 				rl.GuiDisable()
 			}
 
 			if rl.GuiButton(r, text) {
-				roll(game_state)
+				game_state.should_roll = true
 			}
+
 			rl.GuiEnable()
 
 			cursor.y += size.y
@@ -940,7 +990,6 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 				hovered := rl.CheckCollisionPointRec(mouse, piece_rect)
 				is_selected := game_state.selected_piece_index == i32(j)
 				if hovered &&
-				   !game_state.can_roll &&
 				   belongs_to_player &&
 				   len(game_state.rolls) != 0 &&
 				   !is_selected &&
@@ -1005,8 +1054,9 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 
 	// draw moves
 	{
+		moves := get_player_moves(game_state)
 		finisher_move_count := 0
-		for move in game_state.moves {
+		for move in moves {
 			if move.finish do finisher_move_count += 1
 		}
 
@@ -1014,7 +1064,7 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 		font_size := style.font_size * 0.75
 
 		cursor := Vec2{}
-		for move, move_idx in game_state.moves {
+		for move, move_idx in moves {
 			pos := game_state.draw_state.cell_positions[move.cell]
 			if move.finish {
 				pos += cursor + piece_size * 0.5
