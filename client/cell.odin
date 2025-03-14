@@ -249,28 +249,41 @@ select_cell_radius :: proc(cell: Cell_ID, side_radius: f32, center_and_corner_ra
 }
 
 get_move_sequance :: proc(
-	start_cell: Cell_ID,
-	move_count: u32,
-	at_starting_position := false,
+	piece: Piece,
+	roll: i32,
 	allocator := context.temp_allocator,
 ) -> (
 	[dynamic]Cell_ID,
+	[dynamic]Cell_ID,
 	bool,
 ) {
-	seq := make([dynamic]Cell_ID, 0, move_count, allocator)
-	prev_cell := start_cell
-	next_cell, win := get_next_cell(start_cell, at_starting_position)
-	append(&seq, next_cell)
-	if win {
-		return seq, win
-	}
-	for i := 1; i < int(move_count); i += 1 {
-		cell, win := get_next_passing_cell(prev_cell, seq[i - 1])
-		prev_cell = seq[i - 1]
-		append(&seq, cell)
-		if win {
-			return seq, true
+	seq0 := make([dynamic]Cell_ID, 0, allocator)
+	seq1 := make([dynamic]Cell_ID, 0, allocator)
+
+	at_start := is_piece_at_start(piece)
+
+	if roll == -1 && !at_start {
+		back0, back1 := get_prev_cell(piece.cell)
+		append(&seq0, back0)
+		if back1 != back0 {
+			append(&seq1, back1)
 		}
 	}
-	return seq, false
+
+	prev_cell := piece.cell
+	next_cell, finish := get_next_cell(piece.cell, at_start)
+	append(&seq0, next_cell)
+	if finish {
+		return seq0, seq1, true
+	}
+
+	for i := 1; i < int(roll); i += 1 {
+		cell, finish := get_next_passing_cell(prev_cell, seq0[i - 1])
+		prev_cell = seq0[i - 1]
+		append(&seq0, cell)
+		if finish {
+			return seq0, seq1, true
+		}
+	}
+	return seq0, seq1, false
 }
