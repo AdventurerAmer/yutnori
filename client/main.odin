@@ -30,12 +30,9 @@ Screen_State :: enum {
 }
 
 Piece :: struct {
+	at_start: bool,
 	finished: bool,
 	cell:     Cell_ID,
-}
-
-is_piece_at_start :: proc(p: Piece) -> bool {
-	return p.cell == .BottomRightCorner && !p.finished
 }
 
 Player_State :: struct {
@@ -93,6 +90,8 @@ Game_State :: struct {
 	target_position:         Vec2,
 	target_position_percent: f32,
 	move_seq_idx:            i32,
+	use_debug_roll:          bool,
+	debug_roll:              i32,
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -128,6 +127,7 @@ reset_game_state :: proc(game_state: ^Game_State) {
 		p.color = PLAYER_COLORS[i]
 		for j in 0 ..< MAX_PIECE_COUNT {
 			piece := Piece {
+				at_start = true,
 				finished = false,
 				cell     = .BottomRightCorner,
 			}
@@ -139,10 +139,14 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	game_state.selected_piece_index = -1
 	game_state.current_action = .Unready
 	game_state.should_roll = false
+	game_state.use_debug_roll = true
 }
 
 roll :: proc(game_state: ^Game_State) -> i32 {
 	n := rand.int31_max(7) - 1
+	if game_state.use_debug_roll {
+		n = game_state.debug_roll
+	}
 	should_append := true
 	if n == 0 {
 		should_append = false
@@ -151,7 +155,7 @@ roll :: proc(game_state: ^Game_State) -> i32 {
 	player := game_state.players[game_state.player_turn_index]
 	all_pieces_at_start := true
 	for piece in player.pieces {
-		if !is_piece_at_start(piece) {
+		if !piece.at_start {
 			all_pieces_at_start = false
 			break
 		}
@@ -240,6 +244,44 @@ main :: proc() {
 
 	for running {
 		free_all(context.temp_allocator)
+
+		if rl.IsKeyPressed(.R) {
+			game_state.use_debug_roll = !game_state.use_debug_roll
+		}
+
+		if game_state.use_debug_roll {
+			if rl.IsKeyPressed(.GRAVE) {
+				game_state.debug_roll = -1
+			}
+			if rl.IsKeyPressed(.ZERO) {
+				game_state.debug_roll = 0
+			}
+			if rl.IsKeyPressed(.ONE) {
+				game_state.debug_roll = 1
+			}
+			if rl.IsKeyPressed(.TWO) {
+				game_state.debug_roll = 2
+			}
+			if rl.IsKeyPressed(.THREE) {
+				game_state.debug_roll = 3
+			}
+			if rl.IsKeyPressed(.FOUR) {
+				game_state.debug_roll = 4
+			}
+			if rl.IsKeyPressed(.FIVE) {
+				game_state.debug_roll = 5
+			}
+			{
+				rl.DrawTextEx(
+					default_style.font,
+					fmt.ctprintf("NEXT ROLL: %d", game_state.debug_roll),
+					{5, 5},
+					default_style.font_size * 0.75,
+					default_style.font_spacing,
+					rl.DARKGREEN,
+				)
+			}
+		}
 
 		if rl.WindowShouldClose() {
 			running = false
@@ -461,7 +503,7 @@ main :: proc() {
 					to,
 					ease_in_out_quint(game_state.target_position_percent),
 				)
-				game_state.target_position_percent += dt * 5
+				game_state.target_position_percent += dt * 3
 				game_state.target_position_percent = math.clamp(
 					game_state.target_position_percent,
 					0.0,
@@ -479,15 +521,16 @@ main :: proc() {
 				piece_to_move := current_player.pieces[game_state.target_piece]
 
 				// moving pieces
-				if is_piece_at_start(piece_to_move) {
+				if piece_to_move.at_start {
 					piece_to_move.finished = move.finish
 					piece_to_move.cell = move.cell
+					piece_to_move.at_start = false
 					current_player.pieces[game_state.target_piece] = piece_to_move
 				} else {
 					for piece_idx in 0 ..< game_state.piece_count {
 						piece := current_player.pieces[piece_idx]
 						if piece.finished do continue
-						if piece.cell == piece_to_move.cell {
+						if piece.cell == piece_to_move.cell && !piece.at_start {
 							piece.cell = move.cell
 							piece.finished = move.finish
 						}
@@ -503,9 +546,10 @@ main :: proc() {
 						piece := player.pieces[piece_idx]
 						if piece.finished do continue
 						if piece.cell == move.cell &&
-						   !is_piece_at_start(piece) &&
+						   !piece.at_start &&
 						   player_idx != i32(game_state.player_turn_index) {
 							piece.cell = .BottomRightCorner
+							piece.at_start = true
 							stomped = true
 						}
 						player.pieces[piece_idx] = piece
@@ -569,14 +613,12 @@ main :: proc() {
 						r := Rect{pos.x, pos.y, piece_size.x, piece_size.y}
 						if rl.CheckCollisionPointRec(rl.GetMousePosition(), r) &&
 						   rl.IsMouseButtonPressed(.LEFT) {
-							current_player := game_state.players[game_state.player_turn_index]
-							piece := current_player.pieces[game_state.selected_piece_index]
 							game_state.target_piece = game_state.selected_piece_index
-							game_state.selected_piece_index = -1
 							game_state.target_move = move
 							game_state.move_seq_idx = -1
 							game_state.target_position_percent = 0
 							game_state.current_action = .BeginMove
+							game_state.selected_piece_index = -1
 							moved_this_frame = true
 							break
 						}
@@ -872,7 +914,7 @@ get_piece_rect :: proc(
 	size := draw_state.piece_size
 	spacing := draw_state.piece_spacing
 	piece := player.pieces[piece_idx]
-	if is_piece_at_start(piece) {
+	if piece.at_start {
 		pos := Vec2{f32(piece_idx) * (size.x + spacing), 0}
 		result = Rect{offset.x + pos.x, offset.y + pos.y, size.x, size.y}
 	} else {
@@ -1031,13 +1073,32 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 			pos := Vec2{offset.x, offset.y}
 			pos.x += total_width * 0.5 - size.x * 0.5
 
+			if belongs_to_current_player {
+				outline_thickness := style.font_size * 0.1
+				for i := -outline_thickness; i <= outline_thickness; i += 1 {
+					for j := -outline_thickness; j <= outline_thickness; j += 1 {
+						if (i == 0 || j == 0) do continue
+						p := pos
+						p.x += f32(i)
+						p.y += f32(j)
+						rl.DrawTextEx(
+							style.font,
+							text,
+							p,
+							style.font_size,
+							style.font_spacing,
+							rl.GOLD,
+						)
+					}
+				}
+			}
 			rl.DrawTextEx(style.font, text, pos, style.font_size, style.font_spacing, color)
 
 			offset.y += size.y + screen_size.y * 0.005
 			for piece_idx in 0 ..< game_state.piece_count {
 				piece := player.pieces[piece_idx]
 				piece_rect := get_piece_rect(draw_state, player, piece_idx, offset^)
-				if piece.finished || !is_piece_at_start(piece) {
+				if piece.finished || !piece.at_start {
 					pos := Vec2{f32(piece_idx) * (piece_size.x + draw_state.piece_spacing), 0}
 					r := Rect{offset.x + pos.x, offset.y + pos.y, piece_size.x, piece_size.y}
 					rl.DrawRectangleLinesEx(r, min(r.width, r.height) * 0.05, player.color)
@@ -1073,8 +1134,8 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 					for k in 0 ..< game_state.piece_count {
 						if k == piece_idx do continue
 						other := player.pieces[k]
-						if !is_piece_at_start(piece) &&
-						   !is_piece_at_start(other) &&
+						if !piece.at_start &&
+						   !other.at_start &&
 						   !other.finished &&
 						   other.cell == piece.cell {
 							piece_union_count += 1

@@ -260,10 +260,8 @@ get_move_sequance :: proc(
 	seq0 := make([dynamic]Cell_ID, 0, allocator)
 	seq1 := make([dynamic]Cell_ID, 0, allocator)
 
-	at_start := is_piece_at_start(piece)
-
 	if roll == -1 {
-		if !at_start {
+		if !piece.at_start {
 			back0, back1 := get_prev_cell(piece.cell)
 			append(&seq0, back0)
 			if back1 != back0 {
@@ -274,7 +272,7 @@ get_move_sequance :: proc(
 	}
 
 	prev_cell := piece.cell
-	next_cell, finish := get_next_cell(piece.cell, at_start)
+	next_cell, finish := get_next_cell(piece.cell, piece.at_start)
 	append(&seq0, next_cell)
 	if finish {
 		return seq0, seq1, true
