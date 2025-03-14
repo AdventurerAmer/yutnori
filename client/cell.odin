@@ -262,12 +262,15 @@ get_move_sequance :: proc(
 
 	at_start := is_piece_at_start(piece)
 
-	if roll == -1 && !at_start {
-		back0, back1 := get_prev_cell(piece.cell)
-		append(&seq0, back0)
-		if back1 != back0 {
-			append(&seq1, back1)
+	if roll == -1 {
+		if !at_start {
+			back0, back1 := get_prev_cell(piece.cell)
+			append(&seq0, back0)
+			if back1 != back0 {
+				append(&seq1, back1)
+			}
 		}
+		return seq0, seq1, false
 	}
 
 	prev_cell := piece.cell

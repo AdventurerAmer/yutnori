@@ -175,7 +175,9 @@ get_player_moves :: proc(
 	moves := make([dynamic]Move, allocator)
 	for roll, roll_idx in game_state.rolls {
 		path0, path1, finish := get_move_sequance(piece, roll)
-		append(&moves, Move{roll, path0[len(path0) - 1], finish})
+		if len(path0) != 0 {
+			append(&moves, Move{roll, path0[len(path0) - 1], finish})
+		}
 		if len(path1) != 0 {
 			append(&moves, Move{roll, path1[len(path1) - 1], finish})
 		}
