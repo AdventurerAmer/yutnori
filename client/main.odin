@@ -451,10 +451,13 @@ main :: proc() {
 				from -= draw_state.piece_size * 0.5
 				to := draw_state.cell_positions[seq[game_state.move_seq_idx + 1]]
 				to -= draw_state.piece_size * 0.5
+				ease_in_out_quint :: proc(x: f32) -> f32 {
+					return x < 0.5 ? 16 * x * x * x * x * x : 1 - math.pow(-2 * x + 2, 5) / 2
+				}
 				game_state.target_position = math.lerp(
 					from,
 					to,
-					game_state.target_position_percent,
+					ease_in_out_quint(game_state.target_position_percent),
 				)
 				game_state.target_position_percent += dt * 5
 				game_state.target_position_percent = math.clamp(
@@ -1040,7 +1043,8 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 				if piece.finished do continue
 				hovered := rl.CheckCollisionPointRec(mouse, piece_rect)
 				is_selected := game_state.selected_piece_index == piece_idx
-				if hovered &&
+				if game_state.current_action == .Ticking &&
+				   hovered &&
 				   belongs_to_current_player &&
 				   len(game_state.rolls) != 0 &&
 				   !is_selected &&
@@ -1126,6 +1130,14 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 
 		cursor := Vec2{}
 		for move, move_idx in moves {
+			duplicate_move := false
+			for i := 0; i < move_idx; i += 1 {
+				if moves[i].cell == move.cell {
+					duplicate_move = true
+					break
+				}
+			}
+			if duplicate_move do continue
 			pos := game_state.draw_state.cell_positions[move.cell]
 			if move.finish {
 				pos += cursor + piece_size * 0.5
