@@ -38,7 +38,7 @@ get_screen_rect :: proc() -> Rect {
 	return {0, 0, f32(rl.GetRenderWidth()), f32(rl.GetRenderHeight())}
 }
 
-get_anchors_from_rect :: proc(rect: Rect) -> Anchors_Points {
+get_anchor_points :: proc(rect: Rect) -> Anchors_Points {
 	p := Anchors_Points{}
 	p.top_center = Vec2{rect.x + rect.width * 0.5, rect.y}
 	p.bottom_center = Vec2{rect.x + rect.width * 0.5, rect.y + rect.height}
