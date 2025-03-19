@@ -1,11 +1,18 @@
 package client
 
+import "base:intrinsics"
+import "core:container/queue"
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
+import "core:net"
 import "core:reflect"
+import "core:sync"
+import "core:thread"
+import "core:time"
+
 
 import rl "vendor:raylib"
 
@@ -21,14 +28,6 @@ MAX_PLAYER_COUNT :: 6
 
 MIN_PIECE_COUNT :: 2
 MAX_PIECE_COUNT :: 6
-
-Screen_State :: enum {
-	MainMenu,
-	GameModes,
-	LocalGameMode,
-	MultiplayerGameMode,
-	GamePlay,
-}
 
 Piece :: struct {
 	at_start: bool,
@@ -74,6 +73,20 @@ Action :: enum {
 	SelectingMove,
 }
 
+Quit_Command :: struct {}
+
+Connect_Command :: struct {
+	server_addr: string,
+}
+
+Disconnect_Command :: struct {}
+
+Command :: union {
+	Connect_Command,
+	Disconnect_Command,
+	Quit_Command,
+}
+
 Game_State :: struct {
 	running:                 bool,
 	screen_state:            Screen_State,
@@ -95,6 +108,47 @@ Game_State :: struct {
 	move_seq_idx:            i32,
 	use_debug_roll:          bool,
 	debug_roll:              i32,
+	worker_thread:           ^thread.Thread,
+	commands_queue:          queue.Queue(Command),
+	commands_queue_mutex:    sync.Mutex,
+	commands_semaphore:      sync.Sema,
+	connected:               bool,
+}
+
+SERVER_ADDRESS :: "localhost:42069"
+
+worker_thread_proc :: proc(t: ^thread.Thread) {
+	game_state := cast(^Game_State)t.data
+	q := &game_state.commands_queue
+	mu := &game_state.commands_queue_mutex
+	socket: net.TCP_Socket
+	loop: for {
+		sync.sema_wait(&game_state.commands_semaphore)
+		sync.lock(mu)
+		defer sync.unlock(mu)
+		for queue.len(q^) != 0 {
+			cmd := queue.pop_front(q)
+			switch c in cmd {
+			case Connect_Command:
+				if !intrinsics.atomic_load(&game_state.connected) {
+					err: net.Network_Error
+					socket, err = net.dial_tcp_from_hostname_and_port_string(c.server_addr)
+					if err != nil {
+						fmt.println(err)
+					} else {
+						fmt.println("connected to server")
+						intrinsics.atomic_store(&game_state.connected, true)
+					}
+				}
+			case Disconnect_Command:
+				fmt.println("disconnected from server")
+				net.close(socket)
+				socket = 0
+			case Quit_Command:
+				break loop
+			}
+		}
+	}
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -108,6 +162,12 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 deinit_game :: proc(game_state: ^Game_State) {
 	delete(game_state.rolls)
 	delete(game_state.players)
+	if game_state.worker_thread != nil {
+		push_cmd(game_state, Quit_Command{})
+		thread.join(game_state.worker_thread)
+		thread.destroy(game_state.worker_thread)
+		queue.destroy(&game_state.commands_queue)
+	}
 	free(game_state, context.allocator)
 }
 
@@ -486,6 +546,36 @@ get_current_player_moves :: proc(
 	return moves
 }
 
+push_cmd :: proc(game_state: ^Game_State, cmd: Command) {
+	sync.lock(&game_state.commands_queue_mutex)
+	queue.push_back(&game_state.commands_queue, cmd)
+	sync.unlock(&game_state.commands_queue_mutex)
+	sync.sema_post(&game_state.commands_semaphore)
+}
+
+connect :: proc(game_state: ^Game_State) {
+	if game_state.worker_thread == nil {
+		queue.init(&game_state.commands_queue)
+		worker := thread.create(worker_thread_proc, .High)
+		worker.data = game_state
+		thread.start(worker)
+		game_state.worker_thread = worker
+	}
+	if !intrinsics.atomic_load(&game_state.connected) {
+		connect_cmd := Connect_Command {
+			server_addr = SERVER_ADDRESS,
+		}
+		push_cmd(game_state, connect_cmd)
+	}
+}
+
+disconnect :: proc(game_state: ^Game_State) {
+	if intrinsics.atomic_load(&game_state.connected) {
+		disconnect_cmd := Disconnect_Command{}
+		push_cmd(game_state, disconnect_cmd)
+	}
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		tracker: mem.Tracking_Allocator
@@ -569,7 +659,7 @@ main :: proc() {
 				game_state.debug_roll = 5
 			}
 
-			{
+			if game_state.screen_state == .GamePlay {
 				rl.DrawTextEx(
 					default_style.font,
 					fmt.ctprintf("NEXT ROLL: %d", game_state.debug_roll),
@@ -595,7 +685,15 @@ main :: proc() {
 			draw_game_modes_menu(game_state, default_style)
 		case .LocalGameMode:
 			draw_local_game_mode_menu(game_state, default_style)
+		case .Connecting:
+			if !intrinsics.atomic_load(&game_state.connected) {
+				draw_connecting_screen(game_state, default_style)
+			} else {
+				game_state.screen_state = .MultiplayerGameMode
+			}
 		case .MultiplayerGameMode:
+			draw_multiplayer_game_mode_menu(game_state, default_style)
+		case .Room:
 		case .GamePlay:
 			mouse := rl.GetMousePosition()
 
