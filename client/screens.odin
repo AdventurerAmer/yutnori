@@ -284,7 +284,6 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 		w := get_widget(layout, room_id)
 		c_text := cast(cstring)&text_buffer[0]
 		if rl.GuiTextBox(w.rect, c_text, MAX_INPUT_CHARS, true) {
-			fmt.println(c_text)
 		}
 	}
 

@@ -73,82 +73,36 @@ Action :: enum {
 	SelectingMove,
 }
 
-Quit_Command :: struct {}
-
-Connect_Command :: struct {
-	server_addr: string,
-}
-
-Disconnect_Command :: struct {}
-
-Command :: union {
-	Connect_Command,
-	Disconnect_Command,
-	Quit_Command,
-}
-
 Game_State :: struct {
-	running:                 bool,
-	screen_state:            Screen_State,
-	is_paused:               bool,
-	draw_state:              Draw_State,
-	piece_count:             i32,
-	player_count:            i32,
-	players:                 [dynamic]Player_State,
-	player_turn_index:       i32,
-	player_won_index:        i32,
-	rolls:                   [dynamic]i32,
-	selected_piece_index:    i32,
-	current_action:          Action,
-	should_roll:             bool,
-	target_move:             Move,
-	target_piece:            i32,
-	target_position:         Vec2,
-	target_position_percent: f32,
-	move_seq_idx:            i32,
-	use_debug_roll:          bool,
-	debug_roll:              i32,
-	worker_thread:           ^thread.Thread,
-	commands_queue:          queue.Queue(Command),
-	commands_queue_mutex:    sync.Mutex,
-	commands_semaphore:      sync.Sema,
-	connected:               bool,
-}
-
-SERVER_ADDRESS :: "localhost:42069"
-
-worker_thread_proc :: proc(t: ^thread.Thread) {
-	game_state := cast(^Game_State)t.data
-	q := &game_state.commands_queue
-	mu := &game_state.commands_queue_mutex
-	socket: net.TCP_Socket
-	loop: for {
-		sync.sema_wait(&game_state.commands_semaphore)
-		sync.lock(mu)
-		defer sync.unlock(mu)
-		for queue.len(q^) != 0 {
-			cmd := queue.pop_front(q)
-			switch c in cmd {
-			case Connect_Command:
-				if !intrinsics.atomic_load(&game_state.connected) {
-					err: net.Network_Error
-					socket, err = net.dial_tcp_from_hostname_and_port_string(c.server_addr)
-					if err != nil {
-						fmt.println(err)
-					} else {
-						fmt.println("connected to server")
-						intrinsics.atomic_store(&game_state.connected, true)
-					}
-				}
-			case Disconnect_Command:
-				fmt.println("disconnected from server")
-				net.close(socket)
-				socket = 0
-			case Quit_Command:
-				break loop
-			}
-		}
-	}
+	running:                  bool,
+	screen_state:             Screen_State,
+	is_paused:                bool,
+	draw_state:               Draw_State,
+	piece_count:              i32,
+	player_count:             i32,
+	players:                  [dynamic]Player_State,
+	player_turn_index:        i32,
+	player_won_index:         i32,
+	rolls:                    [dynamic]i32,
+	selected_piece_index:     i32,
+	current_action:           Action,
+	should_roll:              bool,
+	target_move:              Move,
+	target_piece:             i32,
+	target_position:          Vec2,
+	target_position_percent:  f32,
+	move_seq_idx:             i32,
+	use_debug_roll:           bool,
+	debug_roll:               i32,
+	net_thread:               ^thread.Thread,
+	net_commands_queue:       queue.Queue(Net_Command),
+	net_commands_queue_mutex: sync.Mutex,
+	net_commands_semaphore:   sync.Sema,
+	net_response_queue:       queue.Queue(Net_Response),
+	net_response_queue_mutex: sync.Mutex,
+	connected:                bool,
+	is_trying_to_connect:     bool,
+	connection_timer:         f32,
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -162,11 +116,12 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 deinit_game :: proc(game_state: ^Game_State) {
 	delete(game_state.rolls)
 	delete(game_state.players)
-	if game_state.worker_thread != nil {
-		push_cmd(game_state, Quit_Command{})
-		thread.join(game_state.worker_thread)
-		thread.destroy(game_state.worker_thread)
-		queue.destroy(&game_state.commands_queue)
+	if game_state.net_thread != nil {
+		push_net_cmd(game_state, Quit_NC{})
+		thread.join(game_state.net_thread)
+		thread.destroy(game_state.net_thread)
+		queue.destroy(&game_state.net_commands_queue)
+		queue.destroy(&game_state.net_response_queue)
 	}
 	free(game_state, context.allocator)
 }
@@ -546,36 +501,6 @@ get_current_player_moves :: proc(
 	return moves
 }
 
-push_cmd :: proc(game_state: ^Game_State, cmd: Command) {
-	sync.lock(&game_state.commands_queue_mutex)
-	queue.push_back(&game_state.commands_queue, cmd)
-	sync.unlock(&game_state.commands_queue_mutex)
-	sync.sema_post(&game_state.commands_semaphore)
-}
-
-connect :: proc(game_state: ^Game_State) {
-	if game_state.worker_thread == nil {
-		queue.init(&game_state.commands_queue)
-		worker := thread.create(worker_thread_proc, .High)
-		worker.data = game_state
-		thread.start(worker)
-		game_state.worker_thread = worker
-	}
-	if !intrinsics.atomic_load(&game_state.connected) {
-		connect_cmd := Connect_Command {
-			server_addr = SERVER_ADDRESS,
-		}
-		push_cmd(game_state, connect_cmd)
-	}
-}
-
-disconnect :: proc(game_state: ^Game_State) {
-	if intrinsics.atomic_load(&game_state.connected) {
-		disconnect_cmd := Disconnect_Command{}
-		push_cmd(game_state, disconnect_cmd)
-	}
-}
-
 main :: proc() {
 	when ODIN_DEBUG {
 		tracker: mem.Tracking_Allocator
@@ -628,6 +553,24 @@ main :: proc() {
 	for game_state.running {
 		free_all(context.temp_allocator)
 
+		if game_state.net_thread != nil {
+			sync.lock(&game_state.net_response_queue_mutex)
+			for queue.len(game_state.net_response_queue) != 0 {
+				response := queue.pop_front(&game_state.net_response_queue)
+				switch resp in response {
+				case Connect_NR:
+					if resp.connected {
+						game_state.connected = true
+					} else {
+						if resp.err != nil {
+							fmt.println(resp.err)
+						}
+						game_state.is_trying_to_connect = false
+					}
+				}
+			}
+			sync.unlock(&game_state.net_response_queue_mutex)
+		}
 		if rl.WindowShouldClose() {
 			close_game(game_state)
 		}
@@ -686,10 +629,18 @@ main :: proc() {
 		case .LocalGameMode:
 			draw_local_game_mode_menu(game_state, default_style)
 		case .Connecting:
-			if !intrinsics.atomic_load(&game_state.connected) {
-				draw_connecting_screen(game_state, default_style)
-			} else {
+			dt := rl.GetFrameTime()
+			if !game_state.is_trying_to_connect {
+				game_state.connection_timer += dt
+				if game_state.connection_timer >= 0.5 {
+					connect(game_state)
+					game_state.connection_timer = 0.0
+				}
+			}
+			if game_state.connected {
 				game_state.screen_state = .MultiplayerGameMode
+			} else {
+				draw_connecting_screen(game_state, default_style)
 			}
 		case .MultiplayerGameMode:
 			draw_multiplayer_game_mode_menu(game_state, default_style)
