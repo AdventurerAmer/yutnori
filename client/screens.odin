@@ -217,10 +217,6 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 	layout.style = style
 
 	padding := Vec2{0.01, 0.01} * screen_size
-	players_id := push_widget(&layout, "PLAYERS", padding)
-	players_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
-	pieces_id := push_widget(&layout, "PIECES", padding)
-	pieces_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
 
 	push_widget(&layout, "", padding)
 	create_room_id := push_widget(&layout, "CREATE ROOM", padding)
@@ -229,6 +225,65 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 
 	room_id := push_widget(&layout, "ROOM ID", padding * Vec2{8, 1})
 	join_room_id := push_widget(&layout, "JOIN ROOM", padding)
+
+	push_widget(&layout, "", padding)
+
+	back_id := push_widget(&layout, "BACK", padding)
+
+	end_vertical_layout(&layout, ui_points.center)
+
+	{
+		if game_state.is_trying_to_create_room {
+			rl.GuiDisable()
+		}
+		w := get_widget(layout, create_room_id)
+		if rl.GuiButton(w.rect, w.text) {
+			create_room(game_state)
+		}
+		rl.GuiEnable()
+	}
+
+	MAX_INPUT_CHARS :: 16
+	@(static) text_buffer: [MAX_INPUT_CHARS + 1]u8
+
+	{
+		w := get_widget(layout, room_id)
+		c_text := cast(cstring)&text_buffer[0]
+		if rl.GuiTextBox(w.rect, c_text, MAX_INPUT_CHARS, true) {
+		}
+	}
+
+	{
+		w := get_widget(layout, join_room_id)
+		if rl.GuiButton(w.rect, w.text) {
+			c_text := cast(cstring)&text_buffer[0]
+			fmt.println(c_text)
+		}
+	}
+
+	{
+		w := get_widget(layout, back_id)
+		if rl.GuiButton(w.rect, w.text) {
+			disconnect(game_state)
+			reset_game_state(game_state)
+			game_state.screen_state = .GameModes
+		}
+	}
+}
+
+draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
+	screen_size := get_screen_size()
+	ui_points := get_anchor_points({0, 0, screen_size.x, screen_size.y})
+
+	spacing := 0.005 * screen_size.y
+	layout := begin_vertical_layout(spacing)
+	layout.style = style
+
+	padding := Vec2{0.01, 0.01} * screen_size
+	players_id := push_widget(&layout, "PLAYERS", padding)
+	players_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
+	pieces_id := push_widget(&layout, "PIECES", padding)
+	pieces_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
 
 	push_widget(&layout, "", padding)
 
@@ -271,36 +326,14 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 	}
 
 	{
-		w := get_widget(layout, create_room_id)
-		if rl.GuiButton(w.rect, w.text) {
-			game_state.screen_state = .GamePlay
+		if game_state.is_trying_to_exit_room {
+			rl.GuiDisable()
 		}
-	}
-
-	MAX_INPUT_CHARS :: 16
-	@(static) text_buffer: [MAX_INPUT_CHARS + 1]u8
-
-	{
-		w := get_widget(layout, room_id)
-		c_text := cast(cstring)&text_buffer[0]
-		if rl.GuiTextBox(w.rect, c_text, MAX_INPUT_CHARS, true) {
-		}
-	}
-
-	{
-		w := get_widget(layout, join_room_id)
-		if rl.GuiButton(w.rect, w.text) {
-			c_text := cast(cstring)&text_buffer[0]
-			fmt.println(c_text)
-		}
-	}
-
-	{
 		w := get_widget(layout, back_id)
 		if rl.GuiButton(w.rect, w.text) {
-			disconnect(game_state)
 			reset_game_state(game_state)
-			game_state.screen_state = .GameModes
+			exit_room(game_state)
 		}
+		rl.GuiEnable()
 	}
 }

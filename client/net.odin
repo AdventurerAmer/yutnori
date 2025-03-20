@@ -11,36 +11,52 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 
-Connect_NC :: struct {
-	server_addr: string,
+Net_State :: struct {
+	mu:             sync.Mutex,
+	allocator_data: []byte,
+	allocator:      mem.Allocator,
+	socket:         net.TCP_Socket,
+	client_id:      string,
+	room_id:        string,
+	connected_sema: sync.Sema,
+	quit:           bool,
 }
 
+Connect_NC :: struct {}
 Disconnect_NC :: struct {}
-
 Quit_NC :: struct {}
-
 Create_Room_NC :: struct {}
+Exit_Room_NC :: struct {}
 
 Net_Command :: union {
 	Connect_NC,
 	Disconnect_NC,
 	Quit_NC,
 	Create_Room_NC,
+	Exit_Room_NC,
 }
 
 Connect_NR :: struct {
 	err:       net.Network_Error,
 	connected: bool,
 }
+Create_Room_NR :: struct {
+	created: bool,
+}
+Exit_Room_NR :: struct {
+	exit: bool,
+}
 
 Net_Response :: union {
 	Connect_NR,
+	Create_Room_NR,
+	Exit_Room_NR,
 }
 
 Net_Message_Type :: enum u8 {
-	KeepAlive,
 	ClientID,
 	CreateRoom,
+	ExitRoom,
 }
 
 Net_Message :: struct {
@@ -48,17 +64,19 @@ Net_Message :: struct {
 	payload: []u8,
 }
 
-Client_ID_NM :: struct {
-	id: string `json:"id"`,
-}
-
-serialize_net_message :: proc(msg: Net_Message, allocator := context.temp_allocator) -> []u8 {
-	data := make([]u8, 1 + len(msg.payload), allocator)
+send_message :: proc(
+	socket: net.TCP_Socket,
+	msg: Net_Message,
+	allocator := context.temp_allocator,
+) -> net.Network_Error {
+	data := make([]u8, 3 + len(msg.payload), allocator)
 	data[0] = auto_cast msg.kind
+	endian.put_u16(data[1:3], .Big, u16(len(msg.payload)))
 	if len(msg.payload) != 0 {
-		copy(data[1:], msg.payload)
+		copy(data[3:], msg.payload)
 	}
-	return data
+	_, err := net.send_tcp(socket, data)
+	return err
 }
 
 read_message :: proc(
@@ -91,7 +109,7 @@ read_message :: proc(
 
 SERVER_ADDRESS :: "localhost:42069"
 
-net_thread_proc :: proc(t: ^thread.Thread) {
+sender_thread_proc :: proc(t: ^thread.Thread) {
 	when ODIN_DEBUG {
 		tracker: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&tracker, context.allocator)
@@ -117,8 +135,8 @@ net_thread_proc :: proc(t: ^thread.Thread) {
 	game_state := cast(^Game_State)t.data
 	q := &game_state.net_commands_queue
 	mu := &game_state.net_commands_queue_mutex
-	socket: net.TCP_Socket
-	client_id: string
+	net_state := &game_state.net_state
+
 	loop: for {
 		free_all(context.temp_allocator)
 		sync.sema_wait(&game_state.net_commands_semaphore)
@@ -127,30 +145,143 @@ net_thread_proc :: proc(t: ^thread.Thread) {
 		sync.unlock(mu)
 		switch c in cmd {
 		case Connect_NC:
-			if socket == 0 {
-				err: net.Network_Error
-				socket, err = net.dial_tcp_from_hostname_and_port_string(c.server_addr)
-				if err != nil {
-					fmt.println(err)
-					push_net_response(game_state, Connect_NR{err, false})
+			{
+				sync.lock(&net_state.mu)
+				defer sync.unlock(&net_state.mu)
+				if net_state.socket != 0 {
 					break
 				}
-				msg: ^Net_Message
-				msg, err = read_message(socket)
-				if err != nil {
-					fmt.println(err)
-					net.close(socket)
-					socket = 0
-					push_net_response(game_state, Connect_NR{err, false})
-					break
+			}
+
+			socket, err := net.dial_tcp_from_hostname_and_port_string(SERVER_ADDRESS)
+			if err != nil {
+				fmt.println(err)
+				push_net_response(game_state, Connect_NR{err, false})
+				break
+			}
+
+			{
+				sync.lock(&net_state.mu)
+				defer sync.unlock(&net_state.mu)
+				net_state.socket = socket
+			}
+
+			sync.sema_post(&net_state.connected_sema)
+		case Create_Room_NC:
+			if net_state.socket == 0 {
+				break
+			}
+			create_room_message := Net_Message {
+				kind = .CreateRoom,
+			}
+			err := send_message(net_state.socket, create_room_message)
+			if err != nil {
+				push_net_response(game_state, Create_Room_NR{created = false})
+				break
+			}
+		case Exit_Room_NC:
+			sync.lock(&net_state.mu)
+			defer sync.unlock(&net_state.mu)
+			if net_state.socket == 0 || net_state.room_id == "" {
+				break
+			}
+			delete(net_state.room_id, net_state.allocator)
+			net_state.room_id = ""
+			exit_room_message := Net_Message {
+				kind = .ExitRoom,
+			}
+			err := send_message(net_state.socket, exit_room_message)
+			if err != nil {
+				push_net_response(game_state, Exit_Room_NR{exit = false})
+				break
+			}
+			push_net_response(game_state, Exit_Room_NR{exit = true})
+		case Disconnect_NC:
+			sync.lock(&net_state.mu)
+			defer sync.unlock(&net_state.mu)
+			if net_state.socket == 0 {
+				break
+			}
+			if net_state.client_id != "" {
+				delete(net_state.client_id, net_state.allocator)
+				net_state.client_id = ""
+			}
+			if net_state.room_id != "" {
+				delete(net_state.room_id, net_state.allocator)
+				net_state.room_id = ""
+			}
+			net.close(net_state.socket)
+			net_state.socket = 0
+		case Quit_NC:
+			sync.lock(&net_state.mu)
+			defer sync.unlock(&net_state.mu)
+			if net_state.client_id != "" {
+				delete(net_state.client_id, net_state.allocator)
+				net_state.client_id = ""
+			}
+			if net_state.room_id != "" {
+				delete(net_state.room_id, net_state.allocator)
+				net_state.room_id = ""
+			}
+			net_state.quit = true
+			sync.sema_post(&net_state.connected_sema)
+			break loop
+		}
+	}
+}
+
+receiver_thread_proc :: proc(t: ^thread.Thread) {
+	when ODIN_DEBUG {
+		tracker: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&tracker, context.allocator)
+		context.allocator = mem.tracking_allocator(&tracker)
+		defer {
+			for _, entry in tracker.allocation_map {
+				fmt.eprintf(
+					"tracking allocator: allocation not freed %v bytes @ %v\n",
+					entry.size,
+					entry.location,
+				)
+			}
+			for entry in tracker.bad_free_array {
+				fmt.eprintf(
+					"memory allocator: bad free %v bytes @ %v\n",
+					entry.memory,
+					entry.location,
+				)
+			}
+		}
+	}
+
+	game_state := cast(^Game_State)t.data
+	net_state := &game_state.net_state
+	for {
+		sync.sema_wait(&net_state.connected_sema)
+		{
+			sync.lock(&net_state.mu)
+			defer sync.unlock(&net_state.mu)
+			if net_state.quit {
+				break
+			}
+		}
+		{
+			sync.lock(&net_state.mu)
+			defer sync.unlock(&net_state.mu)
+			if net_state.socket == 0 {
+				continue
+			}
+		}
+		for {
+			msg, err := read_message(net_state.socket)
+			if err != nil {
+				break
+			}
+			#partial switch msg.kind {
+			case .ClientID:
+				Client_ID_NM :: struct {
+					id: string `json:"id"`,
 				}
-				if msg.kind != .ClientID {
-					fmt.printf("message should be client id got %d\n", msg.kind)
-					net.close(socket)
-					socket = 0
-					push_net_response(game_state, Connect_NR{nil, false})
-					break
-				}
+
 				client_id_msg := Client_ID_NM{}
 				if err := json.unmarshal(
 					msg.payload,
@@ -158,25 +289,42 @@ net_thread_proc :: proc(t: ^thread.Thread) {
 					json.DEFAULT_SPECIFICATION,
 					context.temp_allocator,
 				); err != nil {
-					net.close(socket)
-					socket = 0
 					push_net_response(game_state, Connect_NR{nil, false})
 					break
 				}
-				client_id = strings.clone(client_id_msg.id)
-				fmt.println(client_id)
+
+				sync.lock(&net_state.mu)
+				net_state.client_id = strings.clone(client_id_msg.id, net_state.allocator)
+				sync.unlock(&net_state.mu)
+
 				push_net_response(game_state, Connect_NR{nil, true})
+			case .CreateRoom:
+				if msg.kind != .CreateRoom {
+					push_net_response(game_state, Create_Room_NR{created = false})
+					break
+				}
+				Create_Room_Resp :: struct {
+					id: string `json:"id"`,
+				}
+				resp := Create_Room_Resp{}
+				if err := json.unmarshal(
+					msg.payload,
+					&resp,
+					json.DEFAULT_SPECIFICATION,
+					context.temp_allocator,
+				); err != nil {
+					push_net_response(game_state, Create_Room_NR{created = false})
+					break
+				}
+				push_net_response(game_state, Create_Room_NR{created = true})
+				sync.lock(&net_state.mu)
+				net_state.room_id = strings.clone(resp.id, net_state.allocator)
+				sync.unlock(&net_state.mu)
 			}
-		case Create_Room_NC:
-		case Disconnect_NC:
-			delete(client_id)
-			net.close(socket)
-			socket = 0
-		case Quit_NC:
-			break loop
 		}
 	}
 }
+
 
 push_net_cmd :: proc(game_state: ^Game_State, cmd: Net_Command) {
 	sync.lock(&game_state.net_commands_queue_mutex)
@@ -192,21 +340,35 @@ push_net_response :: proc(game_state: ^Game_State, response: Net_Response) {
 }
 
 connect :: proc(game_state: ^Game_State) {
-	if game_state.net_thread == nil {
+	if game_state.net_sender_thread == nil {
 		queue.init(&game_state.net_commands_queue)
 		queue.init(&game_state.net_response_queue)
-		net_thread := thread.create(net_thread_proc, .High)
-		net_thread.data = game_state
-		thread.start(net_thread)
-		game_state.net_thread = net_thread
-	}
-	if !game_state.connected {
-		game_state.is_trying_to_connect = true
-		connect_cmd := Connect_NC {
-			server_addr = SERVER_ADDRESS,
+
+		sender := thread.create(sender_thread_proc)
+		sender.data = game_state
+		thread.start(sender)
+
+		receiver := thread.create(receiver_thread_proc)
+		receiver.data = game_state
+		thread.start(receiver)
+
+		game_state.net_sender_thread = sender
+		game_state.net_receiver_thread = receiver
+
+		allocator := new(mem.Buddy_Allocator)
+		data, err := mem.alloc_bytes(4 * mem.Megabyte)
+		if err != nil {
+			fmt.println(err)
 		}
-		push_net_cmd(game_state, connect_cmd)
+		mem.buddy_allocator_init(allocator, data, mem.DEFAULT_ALIGNMENT)
+		game_state.net_state.allocator_data = data
+		game_state.net_state.allocator = mem.buddy_allocator(allocator)
+
 	}
+	if game_state.connected do return
+	game_state.is_trying_to_connect = true
+	connect_cmd := Connect_NC{}
+	push_net_cmd(game_state, connect_cmd)
 }
 
 disconnect :: proc(game_state: ^Game_State) {
@@ -217,4 +379,12 @@ disconnect :: proc(game_state: ^Game_State) {
 
 create_room :: proc(game_state: ^Game_State) {
 	if !game_state.connected do return
+	game_state.is_trying_to_create_room = true
+	push_net_cmd(game_state, Create_Room_NC{})
+}
+
+exit_room :: proc(game_state: ^Game_State) {
+	if !game_state.connected || !game_state.in_room do return
+	game_state.is_trying_to_exit_room = true
+	push_net_cmd(game_state, Exit_Room_NC{})
 }

@@ -94,7 +94,8 @@ Game_State :: struct {
 	move_seq_idx:             i32,
 	use_debug_roll:           bool,
 	debug_roll:               i32,
-	net_thread:               ^thread.Thread,
+	net_sender_thread:        ^thread.Thread,
+	net_receiver_thread:      ^thread.Thread,
 	net_commands_queue:       queue.Queue(Net_Command),
 	net_commands_queue_mutex: sync.Mutex,
 	net_commands_semaphore:   sync.Sema,
@@ -103,6 +104,11 @@ Game_State :: struct {
 	connected:                bool,
 	is_trying_to_connect:     bool,
 	connection_timer:         f32,
+	is_trying_to_create_room: bool,
+	in_room:                  bool,
+	is_room_master:           bool,
+	is_trying_to_exit_room:   bool,
+	net_state:                Net_State,
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -116,12 +122,17 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 deinit_game :: proc(game_state: ^Game_State) {
 	delete(game_state.rolls)
 	delete(game_state.players)
-	if game_state.net_thread != nil {
+	if game_state.net_sender_thread != nil {
 		push_net_cmd(game_state, Quit_NC{})
-		thread.join(game_state.net_thread)
-		thread.destroy(game_state.net_thread)
+		thread.join(game_state.net_sender_thread)
+		thread.join(game_state.net_receiver_thread)
+		thread.destroy(game_state.net_sender_thread)
+		thread.destroy(game_state.net_receiver_thread)
 		queue.destroy(&game_state.net_commands_queue)
 		queue.destroy(&game_state.net_response_queue)
+
+		delete(game_state.net_state.allocator_data)
+		free(game_state.net_state.allocator.data)
 	}
 	free(game_state, context.allocator)
 }
@@ -553,7 +564,7 @@ main :: proc() {
 	for game_state.running {
 		free_all(context.temp_allocator)
 
-		if game_state.net_thread != nil {
+		if game_state.net_sender_thread != nil {
 			sync.lock(&game_state.net_response_queue_mutex)
 			for queue.len(game_state.net_response_queue) != 0 {
 				response := queue.pop_front(&game_state.net_response_queue)
@@ -567,6 +578,22 @@ main :: proc() {
 						}
 						game_state.is_trying_to_connect = false
 					}
+				case Create_Room_NR:
+					if resp.created {
+						game_state.screen_state = .Room
+						game_state.in_room = true
+						game_state.is_room_master = false
+					}
+					game_state.is_trying_to_create_room = false
+				case Exit_Room_NR:
+					if resp.exit {
+						game_state.in_room = false
+						game_state.is_room_master = false
+						if game_state.screen_state == .Room {
+							game_state.screen_state = .MultiplayerGameMode
+						}
+					}
+					game_state.is_trying_to_exit_room = false
 				}
 			}
 			sync.unlock(&game_state.net_response_queue_mutex)
@@ -645,6 +672,7 @@ main :: proc() {
 		case .MultiplayerGameMode:
 			draw_multiplayer_game_mode_menu(game_state, default_style)
 		case .Room:
+			draw_room_screen(game_state, default_style)
 		case .GamePlay:
 			mouse := rl.GetMousePosition()
 

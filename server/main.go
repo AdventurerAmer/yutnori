@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 )
@@ -19,9 +20,22 @@ type Config struct {
 type MessageType uint8
 
 const (
-	MessageTypeKeepAlive = iota
-	MessageTypeClientID
+	MessageTypeClientID MessageType = iota
+	MessageTypeCreateRoom
+	MessageTypeExitRoom
 )
+
+func (kind MessageType) String() string {
+	switch kind {
+	case MessageTypeClientID:
+		return "ClientID"
+	case MessageTypeCreateRoom:
+		return "CreateRoom"
+	case MessageTypeExitRoom:
+		return "ExitRoom"
+	}
+	return "Unsupported"
+}
 
 type Message struct {
 	Kind    MessageType
@@ -30,16 +44,6 @@ type Message struct {
 
 type MessageSerializer interface {
 	Serialize() (*Message, error)
-}
-
-type KeepAliveMessage struct{}
-
-func (k KeepAliveMessage) Serialize() (*Message, error) {
-	msg := &Message{
-		Kind:    MessageTypeKeepAlive,
-		Payload: nil,
-	}
-	return msg, nil
 }
 
 type ClientIDMessage struct {
@@ -56,6 +60,55 @@ func (c ClientIDMessage) Serialize() (*Message, error) {
 		Payload: payload,
 	}
 	return msg, nil
+}
+
+type CreateRoomMessage struct {
+	ID string `json:"id"`
+}
+
+func (c CreateRoomMessage) Serialize() (*Message, error) {
+	payload, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	msg := &Message{
+		Kind:    MessageTypeCreateRoom,
+		Payload: payload,
+	}
+	return msg, nil
+}
+
+func ReadMessage(conn net.Conn) (*Message, error) {
+	header := make([]byte, 3)
+	for {
+		_, err := io.ReadFull(conn, header)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return nil, err
+		} else {
+			break
+		}
+	}
+	kind := header[0]
+	payloadLen := binary.BigEndian.Uint16(header[1:])
+	if payloadLen == 0 {
+		return &Message{Kind: MessageType(kind)}, nil
+	}
+	payload := make([]byte, payloadLen)
+	for {
+		_, err := io.ReadFull(conn, payload)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return nil, err
+		} else {
+			break
+		}
+	}
+	return &Message{Kind: MessageType(kind), Payload: payload}, nil
 }
 
 func SendMessage(conn net.Conn, serializer MessageSerializer) error {
@@ -105,6 +158,12 @@ func main() {
 	}
 }
 
+func createUUID() string {
+	b := make([]byte, 20)
+	rand.Read(b)
+	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)
+}
+
 func handleConn(conn net.Conn) {
 	defer func() {
 		conn.Close()
@@ -113,31 +172,43 @@ func handleConn(conn net.Conn) {
 
 	log.Printf("%v connected\n", conn.RemoteAddr())
 
-	clientID := make([]byte, 20)
-	rand.Read(clientID)
-
 	msg := ClientIDMessage{
-		ID: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(clientID),
+		ID: createUUID(),
 	}
 	err := SendMessage(conn, msg)
 	if err != nil {
 		log.Println(err)
+		return
 	}
 
 	log.Printf("Sending ID '%s' to client '%s'\n", msg.ID, conn.RemoteAddr())
 
-	buf := make([]byte, 4096)
 	for {
-		n, err := conn.Read(buf)
+		msg, err := ReadMessage(conn)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
-			} else {
-				log.Println(err)
+			log.Println(err)
+			return
+		}
+
+		data := make(map[string]any)
+		if msg.Payload != nil {
+			err = json.Unmarshal(msg.Payload, &data)
+			if err != nil {
+				log.Println(string(msg.Payload), err)
 				return
 			}
 		}
-		msg := buf[:n]
-		log.Println(msg)
+
+		log.Println(msg.Kind, data)
+
+		switch msg.Kind {
+		case MessageTypeCreateRoom:
+			msg := CreateRoomMessage{ID: createUUID()}
+			err := SendMessage(conn, msg)
+			if err != nil {
+				return
+			}
+		case MessageTypeExitRoom:
+		}
 	}
 }
