@@ -74,41 +74,49 @@ Action :: enum {
 }
 
 Game_State :: struct {
-	running:                  bool,
-	screen_state:             Screen_State,
-	is_paused:                bool,
-	draw_state:               Draw_State,
-	piece_count:              i32,
-	player_count:             i32,
-	players:                  [dynamic]Player_State,
-	player_turn_index:        i32,
-	player_won_index:         i32,
-	rolls:                    [dynamic]i32,
-	selected_piece_index:     i32,
-	current_action:           Action,
-	should_roll:              bool,
-	target_move:              Move,
-	target_piece:             i32,
-	target_position:          Vec2,
-	target_position_percent:  f32,
-	move_seq_idx:             i32,
-	use_debug_roll:           bool,
-	debug_roll:               i32,
-	net_sender_thread:        ^thread.Thread,
-	net_receiver_thread:      ^thread.Thread,
-	net_commands_queue:       queue.Queue(Net_Command),
-	net_commands_queue_mutex: sync.Mutex,
-	net_commands_semaphore:   sync.Sema,
-	net_response_queue:       queue.Queue(Net_Response),
-	net_response_queue_mutex: sync.Mutex,
-	connected:                bool,
-	is_trying_to_connect:     bool,
-	connection_timer:         f32,
-	is_trying_to_create_room: bool,
-	in_room:                  bool,
-	is_room_master:           bool,
-	is_trying_to_exit_room:   bool,
-	net_state:                Net_State,
+	running:                      bool,
+	screen_state:                 Screen_State,
+	is_paused:                    bool,
+	draw_state:                   Draw_State,
+	piece_count:                  i32,
+	player_count:                 i32,
+	players:                      [dynamic]Player_State,
+	player_turn_index:            i32,
+	player_won_index:             i32,
+	rolls:                        [dynamic]i32,
+	selected_piece_index:         i32,
+	current_action:               Action,
+	should_roll:                  bool,
+	target_move:                  Move,
+	target_piece:                 i32,
+	target_position:              Vec2,
+	target_position_percent:      f32,
+	move_seq_idx:                 i32,
+	use_debug_roll:               bool,
+	debug_roll:                   i32,
+	net_sender_thread:            ^thread.Thread,
+	net_receiver_thread:          ^thread.Thread,
+	net_commands_queue:           queue.Queue(Net_Command),
+	net_commands_queue_mutex:     sync.Mutex,
+	net_commands_semaphore:       sync.Sema,
+	net_response_queue:           queue.Queue(Net_Response),
+	net_response_queue_mutex:     sync.Mutex,
+	connected:                    bool,
+	is_trying_to_connect:         bool,
+	connection_timer:             f32,
+	is_trying_to_create_room:     bool,
+	in_room:                      bool,
+	is_room_master:               bool,
+	is_trying_to_exit_room:       bool,
+	room_piece_count:             i32,
+	room_ready_player_count:      i32,
+	is_trying_to_set_piece_count: bool,
+	room_player_count:            i32,
+	is_trying_to_ready:           bool,
+	is_trying_to_unready:         bool,
+	is_trying_to_start:           bool,
+	is_ready:                     bool,
+	net_state:                    Net_State,
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -580,12 +588,15 @@ main :: proc() {
 						game_state.screen_state = .MainMenu
 					}
 				case Create_Room_NR:
-					if resp.created {
-						game_state.screen_state = .Room
-						game_state.in_room = true
-						game_state.is_room_master = false
-					}
 					game_state.is_trying_to_create_room = false
+					if resp.created {
+						game_state.in_room = true
+						game_state.is_room_master = true
+						game_state.room_piece_count = 2
+						game_state.room_player_count = 1
+						game_state.room_ready_player_count = 0
+						game_state.screen_state = .Room
+					}
 				case Exit_Room_NR:
 					if resp.exit {
 						game_state.in_room = false
@@ -595,6 +606,11 @@ main :: proc() {
 						}
 					}
 					game_state.is_trying_to_exit_room = false
+				case Set_Piece_Count_NR:
+					if resp.should_set {
+						game_state.room_piece_count = resp.piece_count
+					}
+					game_state.is_trying_to_set_piece_count = false
 				}
 			}
 			sync.unlock(&game_state.net_response_queue_mutex)

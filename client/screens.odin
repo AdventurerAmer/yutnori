@@ -280,49 +280,96 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 	layout.style = style
 
 	padding := Vec2{0.01, 0.01} * screen_size
-	players_id := push_widget(&layout, "PLAYERS", padding)
-	players_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
+
+	room_label_id := push_widget(&layout, "ROOM", padding)
+	room_id_text := fmt.ctprintf("%s", game_state.net_state.room_id)
+	room_id := push_widget(&layout, room_id_text, padding)
+
+	push_widget(&layout, "", padding)
+
 	pieces_id := push_widget(&layout, "PIECES", padding)
 	pieces_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
 
 	push_widget(&layout, "", padding)
+
+	ready_unready_id: int
+	if game_state.is_ready {
+		ready_unready_id = push_widget(&layout, "UNREADY", padding)
+	} else {
+		ready_unready_id = push_widget(&layout, "READY", padding)
+	}
+
+	start_id := push_widget(&layout, "START", padding)
 
 	back_id := push_widget(&layout, "BACK", padding)
 
 	end_vertical_layout(&layout, ui_points.center)
 
 	{
-		w := get_widget(layout, players_id)
+		w := get_widget(layout, room_label_id)
 		rl.GuiLabel(w.rect, w.text)
 	}
 
 	{
-		w := get_widget(layout, players_spinner_id)
-		rl.GuiSpinner(
-			w.rect,
-			nil,
-			&game_state.player_count,
-			MIN_PLAYER_COUNT,
-			MAX_PLAYER_COUNT,
-			false,
-		)
+		w := get_widget(layout, room_id)
+		if rl.GuiLabelButton(w.rect, w.text) {
+			rl.SetClipboardText(room_id_text)
+		}
 	}
 
 	{
-		w := get_widget(layout, pieces_id)
-		rl.GuiLabel(w.rect, w.text)
+		if !game_state.is_room_master {
+			rl.GuiDisable()
+		}
+
+		{
+			w := get_widget(layout, pieces_id)
+			rl.GuiLabel(w.rect, w.text)
+		}
+
+		{
+			if game_state.is_trying_to_set_piece_count {
+				rl.GuiDisable()
+			}
+
+			w := get_widget(layout, pieces_spinner_id)
+			prev_piece_count := game_state.room_piece_count
+			rl.GuiSpinner(
+				w.rect,
+				nil,
+				&game_state.room_piece_count,
+				MIN_PLAYER_COUNT,
+				MAX_PLAYER_COUNT,
+				false,
+			)
+			if prev_piece_count != game_state.room_piece_count {
+				game_state.piece_count = prev_piece_count
+				set_piece_count(game_state, game_state.room_piece_count)
+			}
+		}
+
+		if game_state.room_player_count != game_state.room_ready_player_count {
+			rl.GuiDisable()
+		}
+
+		{
+			w := get_widget(layout, start_id)
+			if rl.GuiButton(w.rect, w.text) {
+			}
+		}
+
+		rl.GuiEnable()
 	}
 
 	{
-		w := get_widget(layout, pieces_spinner_id)
-		rl.GuiSpinner(
-			w.rect,
-			nil,
-			&game_state.piece_count,
-			MIN_PLAYER_COUNT,
-			MAX_PLAYER_COUNT,
-			false,
-		)
+		w := get_widget(layout, ready_unready_id)
+		if rl.GuiButton(w.rect, w.text) {
+			if game_state.is_ready {
+				game_state.is_ready = false
+			} else {
+				game_state.is_ready = true
+			}
+		}
 	}
 
 	{
