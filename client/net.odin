@@ -23,45 +23,72 @@ Net_State :: struct {
 	net_reciver_quit:  bool,
 }
 
-Connect_NC :: struct {}
-Disconnect_NC :: struct {}
-Quit_NC :: struct {}
-Create_Room_NC :: struct {}
-Exit_Room_NC :: struct {}
-Set_Piece_Count_NC :: struct {
-	piece_count: i32,
+Connect_Request :: struct {}
+Disconnect_Request :: struct {}
+Quit_Request :: struct {}
+Create_Room_Request :: struct {}
+Exit_Room_Request :: struct {}
+Set_Piece_Count_Request :: struct {
+	piece_count: i32 `json:"piece_count"`,
+}
+Join_Room_Request :: struct {
+	room_id: string `json:"room_id"`,
+}
+
+Player_Room_State :: struct {
+	client_id: string `json:"client_id"`,
+	is_ready:  bool `json:"is_ready"`,
+}
+
+Join_Room_Response :: struct {
+	join:        bool `json:"join"`,
+	master:      string `json:"master"`,
+	piece_count: u8 `json:"piece_count"`,
+	players:     []Player_Room_State `json:"players"`,
+}
+
+Player_Joined_Response :: struct {
+	client_id: string `json:"client_id"`,
 }
 
 Net_Command :: union {
-	Connect_NC,
-	Disconnect_NC,
-	Quit_NC,
-	Create_Room_NC,
-	Exit_Room_NC,
-	Set_Piece_Count_NC,
+	Connect_Request,
+	Disconnect_Request,
+	Quit_Request,
+	Create_Room_Request,
+	Exit_Room_Request,
+	Set_Piece_Count_Request,
+	Join_Room_Request,
 }
 
-Connect_NR :: struct {
+Connect_Response :: struct {
 	err:       net.Network_Error,
 	connected: bool,
 }
-Disconnect_NR :: struct {}
-Create_Room_NR :: struct {
+Disconnect_Response :: struct {}
+Create_Room_Response :: struct {
 	created: bool,
 }
-Exit_Room_NR :: struct {
+Exit_Room_Response :: struct {
 	exit: bool,
 }
-Set_Piece_Count_NR :: struct {
+Set_Piece_Count_Response :: struct {
 	should_set:  bool,
 	piece_count: i32,
 }
+Room_Master_Response :: struct {
+	master: string,
+}
+
 Net_Response :: union {
-	Connect_NR,
-	Disconnect_NR,
-	Create_Room_NR,
-	Exit_Room_NR,
-	Set_Piece_Count_NR,
+	Connect_Response,
+	Disconnect_Response,
+	Create_Room_Response,
+	Exit_Room_Response,
+	Set_Piece_Count_Response,
+	Room_Master_Response,
+	Join_Room_Response,
+	Player_Joined_Response,
 }
 
 Net_Message_Type :: enum u8 {
@@ -69,6 +96,9 @@ Net_Message_Type :: enum u8 {
 	CreateRoom,
 	ExitRoom,
 	SetPieceCount,
+	RoomMaster,
+	JoinRoom,
+	PlayerJoined,
 }
 
 Net_Message :: struct {
@@ -158,17 +188,17 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 		command := queue.pop_front(q)
 		sync.unlock(mu)
 		switch cmd in command {
-		case Connect_NC:
+		case Connect_Request:
 			if socket != 0 do return
 			// @Bug: net.dial_tcp_from_hostname_and_port_string returns a socket (0) and err (nil) if the host is not reachable it should return socket (0) and err(net.Dial_Error) instead 
 			_socket, err := net.dial_tcp_from_hostname_and_port_string(SERVER_ADDRESS)
 			if err != nil || _socket == 0 {
 				fmt.println(err)
-				push_net_response(game_state, Connect_NR{err, false})
+				push_net_response(game_state, Connect_Response{err, false})
 				break
 			}
 			socket = _socket
-			push_net_response(game_state, Connect_NR{err, true})
+			push_net_response(game_state, Connect_Response{err, true})
 
 			{
 				sync.lock(&net_state.mu)
@@ -177,34 +207,7 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 			}
 
 			sync.sema_post(&net_state.net_receiver_sema)
-		case Create_Room_NC:
-			if socket == 0 {
-				break
-			}
-			create_room_message := Net_Message {
-				kind = .CreateRoom,
-			}
-			err := send_message(socket, create_room_message)
-			if err != nil {
-				push_net_response(game_state, Create_Room_NR{created = false})
-				break
-			}
-		case Exit_Room_NC:
-			sync.lock(&net_state.mu)
-			defer sync.unlock(&net_state.mu)
-			if net_state.socket == 0 || net_state.room_id == "" do return
-			delete(net_state.room_id, net_state.allocator)
-			net_state.room_id = ""
-			exit_room_message := Net_Message {
-				kind = .ExitRoom,
-			}
-			err := send_message(net_state.socket, exit_room_message)
-			if err != nil {
-				push_net_response(game_state, Exit_Room_NR{exit = false})
-				break
-			}
-			push_net_response(game_state, Exit_Room_NR{exit = true})
-		case Disconnect_NC:
+		case Disconnect_Request:
 			if socket == 0 {
 				break
 			}
@@ -223,8 +226,8 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 			}
 			net.close(socket)
 			socket = 0
-			push_net_response(game_state, Disconnect_NR{})
-		case Quit_NC:
+			push_net_response(game_state, Disconnect_Response{})
+		case Quit_Request:
 			sync.lock(&net_state.mu)
 			defer sync.unlock(&net_state.mu)
 			if net_state.client_id != "" {
@@ -238,7 +241,36 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 			net_state.net_reciver_quit = true
 			sync.sema_post(&net_state.net_receiver_sema)
 			break loop
-		case Set_Piece_Count_NC:
+		case Create_Room_Request:
+			if socket == 0 {
+				break
+			}
+			create_room_message := Net_Message {
+				kind = .CreateRoom,
+			}
+			err := send_message(socket, create_room_message)
+			if err != nil {
+				push_net_response(game_state, Create_Room_Response{created = false})
+				break
+			}
+
+		case Exit_Room_Request:
+			sync.lock(&net_state.mu)
+			defer sync.unlock(&net_state.mu)
+			if net_state.socket == 0 || net_state.room_id == "" do return
+			delete(net_state.room_id, net_state.allocator)
+			net_state.room_id = ""
+			exit_room_message := Net_Message {
+				kind = .ExitRoom,
+			}
+			err := send_message(net_state.socket, exit_room_message)
+			if err != nil {
+				push_net_response(game_state, Exit_Room_Response{exit = false})
+				break
+			}
+			push_net_response(game_state, Exit_Room_Response{exit = true})
+
+		case Set_Piece_Count_Request:
 			if socket == 0 {
 				break
 			}
@@ -253,7 +285,7 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 			if err != nil {
 				push_net_response(
 					game_state,
-					Set_Piece_Count_NR{should_set = false, piece_count = 0},
+					Set_Piece_Count_Response{should_set = false, piece_count = 0},
 				)
 			}
 			msg := Net_Message {
@@ -261,6 +293,19 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 				payload = data,
 			}
 			send_message(socket, msg)
+		case Join_Room_Request:
+			if socket == 0 {
+				break
+			}
+			payload, err := json.marshal(cmd, {}, context.temp_allocator)
+			msg := Net_Message {
+				kind    = .JoinRoom,
+				payload = payload,
+			}
+			send_message(socket, msg)
+			sync.lock(&net_state.mu)
+			delete(cmd.room_id, net_state.allocator)
+			sync.unlock(&net_state.mu)
 		}
 	}
 }
@@ -313,7 +358,7 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 			if err != nil {
 				fmt.println("reciever:", err)
 				socket = 0
-				push_net_cmd(game_state, Disconnect_NC{})
+				push_net_cmd(game_state, Disconnect_Request{})
 				break
 			}
 			switch msg.kind {
@@ -329,7 +374,7 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 					json.DEFAULT_SPECIFICATION,
 					context.temp_allocator,
 				); err != nil {
-					push_net_response(game_state, Connect_NR{nil, false})
+					push_net_response(game_state, Connect_Response{nil, false})
 					break
 				}
 
@@ -337,7 +382,7 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 				net_state.client_id = strings.clone(client_id_msg.id, net_state.allocator)
 				sync.unlock(&net_state.mu)
 
-				push_net_response(game_state, Connect_NR{nil, true})
+				push_net_response(game_state, Connect_Response{nil, true})
 			case .CreateRoom:
 				Create_Room_Resp :: struct {
 					id: string `json:"id"`,
@@ -349,13 +394,13 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 					json.DEFAULT_SPECIFICATION,
 					context.temp_allocator,
 				); err != nil {
-					push_net_response(game_state, Create_Room_NR{created = false})
+					push_net_response(game_state, Create_Room_Response{created = false})
 					break
 				}
 				sync.lock(&net_state.mu)
 				net_state.room_id = strings.clone(resp.id, net_state.allocator)
 				sync.unlock(&net_state.mu)
-				push_net_response(game_state, Create_Room_NR{created = true})
+				push_net_response(game_state, Create_Room_Response{created = true})
 			case .ExitRoom:
 			case .SetPieceCount:
 				Set_Piece_Count :: struct {
@@ -369,16 +414,62 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 					json.DEFAULT_SPECIFICATION,
 					context.temp_allocator,
 				); err != nil {
-					push_net_response(game_state, Set_Piece_Count_NR{should_set = false})
+					push_net_response(game_state, Set_Piece_Count_Response{should_set = false})
 					break
 				}
 				push_net_response(
 					game_state,
-					Set_Piece_Count_NR {
+					Set_Piece_Count_Response {
 						should_set = resp.should_set,
 						piece_count = i32(resp.piece_count),
 					},
 				)
+			case .RoomMaster:
+				Room_Master :: struct {
+					master: string `json:"master"`,
+				}
+				resp := Room_Master{}
+				if err := json.unmarshal(
+					msg.payload,
+					&resp,
+					json.DEFAULT_SPECIFICATION,
+					context.temp_allocator,
+				); err != nil {
+					push_net_response(game_state, Set_Piece_Count_Response{should_set = false})
+					break
+				}
+				sync.lock(&net_state.mu)
+				master := strings.clone(resp.master, net_state.allocator)
+				sync.unlock(&net_state.mu)
+				push_net_response(game_state, Room_Master_Response{master = master})
+			case .JoinRoom:
+				resp := Join_Room_Response{}
+				sync.lock(&net_state.mu)
+				defer sync.unlock(&net_state.mu)
+				if err := json.unmarshal(
+					msg.payload,
+					&resp,
+					json.DEFAULT_SPECIFICATION,
+					net_state.allocator,
+				); err != nil {
+					push_net_response(game_state, resp)
+					break
+				}
+				push_net_response(game_state, {})
+			case .PlayerJoined:
+				resp := Player_Joined_Response{}
+				sync.lock(&net_state.mu)
+				defer sync.unlock(&net_state.mu)
+				if err := json.unmarshal(
+					msg.payload,
+					&resp,
+					json.DEFAULT_SPECIFICATION,
+					net_state.allocator,
+				); err != nil {
+					push_net_response(game_state, resp)
+					break
+				}
+				push_net_response(game_state, {})
 			}
 		}
 	}
@@ -427,31 +518,40 @@ connect :: proc(game_state: ^Game_State) {
 	}
 	if game_state.connected do return
 	game_state.is_trying_to_connect = true
-	connect_cmd := Connect_NC{}
+	connect_cmd := Connect_Request{}
 	push_net_cmd(game_state, connect_cmd)
-	fmt.println("trying to connect")
 }
 
 disconnect :: proc(game_state: ^Game_State) {
 	if !game_state.connected do return
-	push_net_cmd(game_state, Disconnect_NC{})
+	push_net_cmd(game_state, Disconnect_Request{})
 	game_state.connected = false
 }
 
 create_room :: proc(game_state: ^Game_State) {
 	if !game_state.connected do return
 	game_state.is_trying_to_create_room = true
-	push_net_cmd(game_state, Create_Room_NC{})
+	push_net_cmd(game_state, Create_Room_Request{})
 }
 
 exit_room :: proc(game_state: ^Game_State) {
 	if !game_state.connected || !game_state.in_room do return
 	game_state.is_trying_to_exit_room = true
-	push_net_cmd(game_state, Exit_Room_NC{})
+	push_net_cmd(game_state, Exit_Room_Request{})
 }
 
 set_piece_count :: proc(game_state: ^Game_State, piece_count: i32) {
 	if !game_state.connected || !game_state.in_room || !game_state.is_room_master do return
 	game_state.is_trying_to_set_piece_count = true
-	push_net_cmd(game_state, Set_Piece_Count_NC{piece_count = piece_count})
+	push_net_cmd(game_state, Set_Piece_Count_Request{piece_count = piece_count})
+}
+
+join_room :: proc(game_state: ^Game_State, room_id: string) {
+	if !game_state.connected || game_state.in_room do return
+	game_state.is_trying_to_join_room = true
+	net_state := &game_state.net_state
+	sync.lock(&net_state.mu)
+	s := strings.clone(room_id, net_state.allocator)
+	sync.unlock(&net_state.mu)
+	push_net_cmd(game_state, Join_Room_Request{room_id = s})
 }

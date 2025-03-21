@@ -223,7 +223,7 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 
 	push_widget(&layout, "", padding)
 
-	room_id := push_widget(&layout, "ROOM ID", padding * Vec2{8, 1})
+	room_id := push_widget(&layout, "ROOM ID", padding * Vec2{26, 1})
 	join_room_id := push_widget(&layout, "JOIN ROOM", padding)
 
 	push_widget(&layout, "", padding)
@@ -243,22 +243,34 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 		rl.GuiEnable()
 	}
 
-	MAX_INPUT_CHARS :: 16
+	MAX_INPUT_CHARS :: 64
 	@(static) text_buffer: [MAX_INPUT_CHARS + 1]u8
 
 	{
 		w := get_widget(layout, room_id)
+		ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+		if ctrl && rl.IsKeyPressed(.V) {
+			clipboard := strings.clone_from_cstring(rl.GetClipboardText(), context.temp_allocator)
+			copy(text_buffer[:MAX_INPUT_CHARS], transmute([]u8)clipboard)
+		}
 		c_text := cast(cstring)&text_buffer[0]
 		if rl.GuiTextBox(w.rect, c_text, MAX_INPUT_CHARS, true) {
 		}
 	}
 
 	{
+		if game_state.is_trying_to_join_room {
+			rl.GuiDisable()
+		}
+
 		w := get_widget(layout, join_room_id)
 		if rl.GuiButton(w.rect, w.text) {
 			c_text := cast(cstring)&text_buffer[0]
-			fmt.println(c_text)
+			room_id := strings.clone_from_cstring(c_text, context.temp_allocator)
+			join_room(game_state, room_id)
 		}
+
+		rl.GuiEnable()
 	}
 
 	{

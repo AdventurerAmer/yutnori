@@ -36,8 +36,9 @@ Piece :: struct {
 }
 
 Player_State :: struct {
-	color:  rl.Color,
-	pieces: [MAX_PIECE_COUNT]Piece,
+	clientID: string,
+	color:    rl.Color,
+	pieces:   [MAX_PIECE_COUNT]Piece,
 }
 
 Move :: struct {
@@ -109,6 +110,7 @@ Game_State :: struct {
 	is_room_master:               bool,
 	is_trying_to_exit_room:       bool,
 	room_piece_count:             i32,
+	is_trying_to_join_room:       bool,
 	room_ready_player_count:      i32,
 	is_trying_to_set_piece_count: bool,
 	room_player_count:            i32,
@@ -131,7 +133,7 @@ deinit_game :: proc(game_state: ^Game_State) {
 	delete(game_state.rolls)
 	delete(game_state.players)
 	if game_state.net_sender_thread != nil {
-		push_net_cmd(game_state, Quit_NC{})
+		push_net_cmd(game_state, Quit_Request{})
 		thread.join(game_state.net_sender_thread)
 		thread.join(game_state.net_receiver_thread)
 		thread.destroy(game_state.net_sender_thread)
@@ -577,17 +579,26 @@ main :: proc() {
 			for queue.len(game_state.net_response_queue) != 0 {
 				response := queue.pop_front(&game_state.net_response_queue)
 				switch resp in response {
-				case Connect_NR:
+				case Connect_Response:
 					game_state.is_trying_to_connect = false
+					net_state := &game_state.net_state
+					sync.lock(&net_state.mu)
+					client_id := net_state.client_id
+					sync.unlock(&net_state.mu)
 					if resp.connected {
 						game_state.connected = true
+						game_state.players[0].clientID = client_id
 					}
-				case Disconnect_NR:
+				case Disconnect_Response:
 					if game_state.connected {
 						game_state.connected = false
+						game_state.in_room = false
+						game_state.is_room_master = false
+						game_state.is_ready = false
+						game_state.room_player_count = 0
 						game_state.screen_state = .MainMenu
 					}
-				case Create_Room_NR:
+				case Create_Room_Response:
 					game_state.is_trying_to_create_room = false
 					if resp.created {
 						game_state.in_room = true
@@ -597,20 +608,52 @@ main :: proc() {
 						game_state.room_ready_player_count = 0
 						game_state.screen_state = .Room
 					}
-				case Exit_Room_NR:
+				case Exit_Room_Response:
 					if resp.exit {
 						game_state.in_room = false
 						game_state.is_room_master = false
+						game_state.is_ready = false
 						if game_state.screen_state == .Room {
 							game_state.screen_state = .MultiplayerGameMode
 						}
 					}
 					game_state.is_trying_to_exit_room = false
-				case Set_Piece_Count_NR:
+				case Set_Piece_Count_Response:
 					if resp.should_set {
 						game_state.room_piece_count = resp.piece_count
 					}
 					game_state.is_trying_to_set_piece_count = false
+				case Room_Master_Response:
+					net_state := &game_state.net_state
+					sync.lock(&net_state.mu)
+					if net_state.client_id == resp.master {
+						game_state.is_room_master = true
+					}
+					delete(resp.master, net_state.allocator)
+					sync.unlock(&net_state.mu)
+				case Join_Room_Response:
+					game_state.is_trying_to_join_room = false
+					if resp.join {
+						net_state := &game_state.net_state
+						sync.lock(&net_state.mu)
+						client_id := net_state.client_id
+						sync.unlock(&net_state.mu)
+						game_state.in_room = true
+						game_state.is_room_master = resp.master == client_id
+						game_state.room_piece_count = i32(resp.piece_count)
+						room_ready_player_count := 0
+						for p in resp.players {
+							if p.is_ready do room_ready_player_count += 1
+							game_state.players[game_state.room_player_count].clientID = p.client_id
+							game_state.room_player_count += 1
+						}
+						game_state.room_player_count = i32(len(resp.players))
+						game_state.room_ready_player_count = i32(room_ready_player_count)
+						game_state.screen_state = .Room
+					}
+				case Player_Joined_Response:
+					game_state.players[game_state.room_player_count].clientID = resp.client_id
+					game_state.room_player_count += 1
 				}
 			}
 			sync.unlock(&game_state.net_response_queue_mutex)

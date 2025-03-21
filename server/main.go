@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	random "math/rand"
 	"net"
 	"sync"
 )
@@ -25,6 +26,9 @@ const (
 	MessageTypeCreateRoom
 	MessageTypeExitRoom
 	MessageTypeSetPieceCount
+	MessageTypeRoomMaster
+	MessageTypeJoinRoom
+	MessageTypePlayerJoined
 )
 
 func (kind MessageType) String() string {
@@ -37,6 +41,12 @@ func (kind MessageType) String() string {
 		return "ExitRoom"
 	case MessageTypeSetPieceCount:
 		return "SetPieceCount"
+	case MessageTypeRoomMaster:
+		return "RoomMaster"
+	case MessageTypeJoinRoom:
+		return "JoinRoom"
+	case MessageTypePlayerJoined:
+		return "PlayerJoined"
 	}
 	return "Unsupported"
 }
@@ -99,6 +109,62 @@ func (c SetPieceMessage) Serialize() (*Message, error) {
 	return msg, nil
 }
 
+type RoomMasterMessage struct {
+	Master ClientID `json:"master"`
+}
+
+func (c RoomMasterMessage) Serialize() (*Message, error) {
+	payload, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	msg := &Message{
+		Kind:    MessageTypeRoomMaster,
+		Payload: payload,
+	}
+	return msg, nil
+}
+
+type PlayerRoomState struct {
+	ClientID ClientID `json:"client_id"`
+	IsReady  bool     `json:"is_ready"`
+}
+
+type JoinRoomResponse struct {
+	Join       bool              `json:"join"`
+	Master     string            `json:"master"`
+	PieceCount uint8             `json:"piece_count"`
+	Players    []PlayerRoomState `json:"players"`
+}
+
+func (j JoinRoomResponse) Serialize() (*Message, error) {
+	payload, err := json.Marshal(j)
+	if err != nil {
+		return nil, err
+	}
+	msg := &Message{
+		Kind:    MessageTypePlayerJoined,
+		Payload: payload,
+	}
+	return msg, nil
+}
+
+type PlayerJoinedResponse struct {
+	ClientID ClientID `json:"client_id"`
+}
+
+func (j PlayerJoinedResponse) Serialize() (*Message, error) {
+	payload, err := json.Marshal(j)
+	if err != nil {
+		return nil, err
+	}
+	msg := &Message{
+		Kind:    MessageTypeJoinRoom,
+		Payload: payload,
+	}
+	return msg, nil
+}
+
 func ReadMessage(conn net.Conn) (*Message, error) {
 	header := make([]byte, 3)
 	for {
@@ -132,19 +198,11 @@ func ReadMessage(conn net.Conn) (*Message, error) {
 	return &Message{Kind: MessageType(kind), Payload: payload}, nil
 }
 
-func SendMessage(conn net.Conn, serializer MessageSerializer) error {
-	m, err := serializer.Serialize()
-	if err != nil {
-		return err
-	}
-	var b bytes.Buffer
-	b.WriteByte(byte(m.Kind))
-	binary.Write(&b, binary.BigEndian, uint16(len(m.Payload)))
-	if len(m.Payload) != 0 {
-		b.Write(m.Payload)
-	}
+func SendMessageRaw(client *Client, msg []byte) error {
+	client.mu.Lock()
+	defer client.mu.Unlock()
 	for {
-		_, err := conn.Write(b.Bytes())
+		_, err := client.Conn.Write(msg)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
@@ -155,6 +213,20 @@ func SendMessage(conn net.Conn, serializer MessageSerializer) error {
 		}
 	}
 	return nil
+}
+
+func SendMessage(client *Client, serializer MessageSerializer) error {
+	m, err := serializer.Serialize()
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	b.WriteByte(byte(m.Kind))
+	binary.Write(&b, binary.BigEndian, uint16(len(m.Payload)))
+	if len(m.Payload) != 0 {
+		b.Write(m.Payload)
+	}
+	return SendMessageRaw(client, b.Bytes())
 }
 
 func (s *Server) BroadcastMessage(room *Room, serializer MessageSerializer) error {
@@ -168,18 +240,18 @@ func (s *Server) BroadcastMessage(room *Room, serializer MessageSerializer) erro
 	if len(m.Payload) != 0 {
 		b.Write(m.Payload)
 	}
+	room.mu.RLock()
+	defer room.mu.RUnlock()
 	for _, clientID := range room.Clients {
-		client := s.clients[clientID]
-		for {
-			_, err := client.Conn.Write(b.Bytes())
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-				return err
-			} else {
-				break
+		err := func(clientID ClientID) error {
+			client := s.GetClient(clientID)
+			if client == nil {
+				return nil
 			}
+			return SendMessageRaw(client, b.Bytes())
+		}(clientID)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -188,10 +260,10 @@ func (s *Server) BroadcastMessage(room *Room, serializer MessageSerializer) erro
 type Server struct {
 	Config Config
 
-	clientsMu sync.Mutex
+	clientsMu sync.RWMutex
 	clients   map[ClientID]*Client
 
-	roomsMu sync.Mutex
+	roomsMu sync.RWMutex
 	rooms   map[RoomID]*Room
 }
 
@@ -207,8 +279,10 @@ type ClientID string
 type RoomID string
 
 type Client struct {
-	Conn   net.Conn
-	RoomID RoomID
+	mu      sync.RWMutex
+	Conn    net.Conn
+	RoomID  RoomID
+	IsReady bool
 }
 
 const MaxPlayerCountInRoom = 6
@@ -217,6 +291,7 @@ const MaxPieceCountInRoom = 6
 const MinPieceCountInRoom = 2
 
 type Room struct {
+	mu         sync.RWMutex
 	Master     ClientID
 	Clients    []ClientID
 	PieceCount uint8
@@ -269,6 +344,13 @@ func (s *Server) RemoveClient(clientID ClientID) {
 	delete(s.clients, clientID)
 }
 
+func (s *Server) GetClient(clientID ClientID) *Client {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+	client := s.clients[clientID]
+	return client
+}
+
 func (s *Server) CreateRoom(master ClientID) RoomID {
 	roomID := RoomID(generateUUID())
 	room := NewRoom(master)
@@ -278,21 +360,37 @@ func (s *Server) CreateRoom(master ClientID) RoomID {
 	return roomID
 }
 
-func (s *Server) ExitRoom(roomID RoomID, clientID ClientID) error {
+func (s *Server) GetRoom(roomID RoomID) *Room {
+	s.roomsMu.RLock()
+	defer s.roomsMu.RUnlock()
+	room := s.rooms[roomID]
+	return room
+}
+
+func (s *Server) RemoveRoom(roomID RoomID) {
 	s.roomsMu.Lock()
-	room, ok := s.rooms[roomID]
 	defer s.roomsMu.Unlock()
-	if !ok {
+	delete(s.rooms, roomID)
+}
+
+func (s *Server) ExitRoom(roomID RoomID, clientID ClientID) error {
+	room := s.GetRoom(roomID)
+	if room == nil {
 		return fmt.Errorf("room doesn't exist")
 	}
-	for clientIdx, client := range room.Clients {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	for idx, client := range room.Clients {
 		if client == clientID {
-			room.Clients = append(room.Clients[:clientIdx], room.Clients[clientIdx+1:]...)
+			room.Clients = append(room.Clients[:idx], room.Clients[idx+1:]...)
 			break
 		}
 	}
-	if len(room.Clients) == 0 {
-		delete(s.rooms, roomID)
+	clientCount := len(room.Clients)
+	if clientCount != 0 && clientID == room.Master {
+		masterIdx := random.Int31n(int32(clientCount))
+		room.Master = room.Clients[masterIdx]
+		s.BroadcastMessage(room, RoomMasterMessage{Master: room.Master})
 	}
 	return nil
 }
@@ -314,7 +412,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 	msg := ClientIDMessage{
 		ID: string(clientID),
 	}
-	err := SendMessage(conn, msg)
+	err := SendMessage(client, msg)
 	if err != nil {
 		log.Println(err)
 		return
@@ -331,9 +429,12 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 
 		switch msg.Kind {
 		case MessageTypeCreateRoom:
+			if client.RoomID != "" { // client is already in a room
+				return
+			}
 			roomID := s.CreateRoom(clientID)
 			msg := CreateRoomMessage{ID: string(roomID)}
-			err := SendMessage(conn, msg)
+			err := SendMessage(client, msg)
 			if err != nil {
 				return
 			}
@@ -354,19 +455,17 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				return
 			}
 			if client.RoomID == "" { // client is not in a room
-				SendMessage(conn, SetPieceMessage{ShouldSet: false})
+				SendMessage(client, SetPieceMessage{ShouldSet: false})
 				break
 			}
 			roomID := client.RoomID
-			s.roomsMu.Lock()
-			room, ok := s.rooms[roomID]
-			s.roomsMu.Unlock()
-			if !ok { // client is in a room that does exit
-				SendMessage(conn, SetPieceMessage{ShouldSet: false})
+			room := s.GetRoom(roomID)
+			if room == nil { // client is in a room that does exit
+				SendMessage(client, SetPieceMessage{ShouldSet: false})
 				break
 			}
 			if room.Master != clientID { // client can't set piece count because he is not the room master
-				SendMessage(conn, SetPieceMessage{ShouldSet: false})
+				SendMessage(client, SetPieceMessage{ShouldSet: false})
 				break
 			}
 			req := struct {
@@ -385,9 +484,52 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				pieceCount = MinPieceCountInRoom
 			}
 			room.PieceCount = uint8(pieceCount)
-			// SendMessage(conn, SetPieceMessage{ShouldSet: true, PieceCount: req.PieceCount})
 			log.Println("broad cast piece count:", req.PieceCount)
 			s.BroadcastMessage(room, SetPieceMessage{ShouldSet: true, PieceCount: req.PieceCount})
+		case MessageTypeJoinRoom:
+			req := struct {
+				RoomID RoomID `json:"room_id"`
+			}{}
+			err := json.Unmarshal(msg.Payload, &req)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			room := s.GetRoom(req.RoomID)
+			if room == nil { // room doesn't exist anymore
+				log.Println("room doesn't exist anymore")
+				SendMessage(client, JoinRoomResponse{})
+				break
+			}
+
+			room.mu.RLock()
+			players := []PlayerRoomState{}
+			for _, roomClientID := range room.Clients {
+				if roomClientID == clientID {
+					continue
+				}
+				roomClient := s.GetClient(roomClientID)
+				state := PlayerRoomState{
+					ClientID: roomClientID,
+					IsReady:  roomClient.IsReady,
+				}
+				players = append(players, state)
+				err := SendMessage(roomClient, PlayerJoinedResponse{ClientID: roomClientID})
+				if err != nil {
+					return
+				}
+			}
+			room.mu.RUnlock()
+			resp := JoinRoomResponse{
+				Join:       true,
+				Master:     string(room.Master),
+				PieceCount: room.PieceCount,
+				Players:    players,
+			}
+			err = SendMessage(client, resp)
+			if err != nil {
+				return
+			}
 		}
 	}
 }
