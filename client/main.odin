@@ -570,13 +570,14 @@ main :: proc() {
 				response := queue.pop_front(&game_state.net_response_queue)
 				switch resp in response {
 				case Connect_NR:
+					game_state.is_trying_to_connect = false
 					if resp.connected {
 						game_state.connected = true
-					} else {
-						if resp.err != nil {
-							fmt.println(resp.err)
-						}
-						game_state.is_trying_to_connect = false
+					}
+				case Disconnect_NR:
+					if game_state.connected {
+						game_state.connected = false
+						game_state.screen_state = .MainMenu
 					}
 				case Create_Room_NR:
 					if resp.created {
