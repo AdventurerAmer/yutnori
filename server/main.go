@@ -26,7 +26,7 @@ const (
 	MessageTypeCreateRoom
 	MessageTypeExitRoom
 	MessageTypeSetPieceCount
-	MessageTypeRoomMaster
+	MessageTypePlayerLeft
 	MessageTypeJoinRoom
 	MessageTypePlayerJoined
 )
@@ -41,8 +41,8 @@ func (kind MessageType) String() string {
 		return "ExitRoom"
 	case MessageTypeSetPieceCount:
 		return "SetPieceCount"
-	case MessageTypeRoomMaster:
-		return "RoomMaster"
+	case MessageTypePlayerLeft:
+		return "PlayerLeft"
 	case MessageTypeJoinRoom:
 		return "JoinRoom"
 	case MessageTypePlayerJoined:
@@ -109,17 +109,18 @@ func (c SetPieceMessage) Serialize() (*Message, error) {
 	return msg, nil
 }
 
-type RoomMasterMessage struct {
+type PlayerLeftMessage struct {
+	Player ClientID `json:"player"`
 	Master ClientID `json:"master"`
 }
 
-func (c RoomMasterMessage) Serialize() (*Message, error) {
+func (c PlayerLeftMessage) Serialize() (*Message, error) {
 	payload, err := json.Marshal(c)
 	if err != nil {
 		return nil, err
 	}
 	msg := &Message{
-		Kind:    MessageTypeRoomMaster,
+		Kind:    MessageTypePlayerLeft,
 		Payload: payload,
 	}
 	return msg, nil
@@ -243,13 +244,11 @@ func (s *Server) BroadcastMessage(room *Room, serializer MessageSerializer) erro
 	room.mu.RLock()
 	defer room.mu.RUnlock()
 	for _, clientID := range room.Clients {
-		err := func(clientID ClientID) error {
-			client := s.GetClient(clientID)
-			if client == nil {
-				return nil
-			}
-			return SendMessageRaw(client, b.Bytes())
-		}(clientID)
+		client := s.GetClient(clientID)
+		if client == nil {
+			continue
+		}
+		err := SendMessageRaw(client, b.Bytes())
 		if err != nil {
 			return err
 		}
@@ -387,10 +386,27 @@ func (s *Server) ExitRoom(roomID RoomID, clientID ClientID) error {
 		}
 	}
 	clientCount := len(room.Clients)
-	if clientCount != 0 && clientID == room.Master {
+	if clientCount != 0 {
 		masterIdx := random.Int31n(int32(clientCount))
 		room.Master = room.Clients[masterIdx]
-		s.BroadcastMessage(room, RoomMasterMessage{Master: room.Master})
+		playerLeftMsg := PlayerLeftMessage{Master: room.Master, Player: clientID}
+		msg, err := playerLeftMsg.Serialize()
+		if err != nil {
+			return err
+		}
+		var b bytes.Buffer
+		b.WriteByte(byte(msg.Kind))
+		binary.Write(&b, binary.BigEndian, uint16(len(msg.Payload)))
+		if len(msg.Payload) != 0 {
+			b.Write(msg.Payload)
+		}
+		for _, clientID := range room.Clients {
+			client := s.GetClient(clientID)
+			if client == nil {
+				continue
+			}
+			SendMessageRaw(client, b.Bytes())
+		}
 	}
 	return nil
 }
@@ -441,6 +457,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 			client.RoomID = roomID
 			log.Printf("client '%s' created room '%s'\n", clientID, roomID)
 		case MessageTypeExitRoom:
+			log.Println("exit room")
 			if client.RoomID == "" {
 				continue
 			}
@@ -500,6 +517,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				return
 			}
 			log.Printf("client '%s' wants to join room '%s'\n", clientID, req.RoomID)
+
 			room := s.GetRoom(req.RoomID)
 			if room == nil { // room doesn't exist anymore
 				log.Println("room doesn't exist anymore")
@@ -507,37 +525,56 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				break
 			}
 
-			room.mu.RLock()
-			players := []PlayerRoomState{}
-			for _, roomClientID := range room.Clients {
-				if roomClientID == clientID {
-					continue
+			func() {
+				room.mu.Lock()
+				defer room.mu.Unlock()
+				if len(room.Clients) == MaxPlayerCountInRoom {
+					log.Println("max number of players in room")
+					SendMessage(client, JoinRoomResponse{})
+					return
 				}
-				roomClient := s.GetClient(roomClientID)
-				state := PlayerRoomState{
-					ClientID: roomClientID,
-					IsReady:  roomClient.IsReady,
+				players := []PlayerRoomState{}
+				for _, roomClientID := range room.Clients {
+					roomClient := s.GetClient(roomClientID)
+					state := PlayerRoomState{
+						ClientID: roomClientID,
+						IsReady:  roomClient.IsReady,
+					}
+					players = append(players, state)
 				}
-				players = append(players, state)
-				err := SendMessage(roomClient, PlayerJoinedResponse{ClientID: roomClientID})
+				log.Println("sent to room")
+				resp := JoinRoomResponse{
+					Join:       true,
+					Master:     string(room.Master),
+					PieceCount: room.PieceCount,
+					Players:    players,
+				}
+				err = SendMessage(client, resp)
 				if err != nil {
 					log.Println(err)
 					return
 				}
-			}
-			room.mu.RUnlock()
-			log.Println("sent to room")
-			resp := JoinRoomResponse{
-				Join:       true,
-				Master:     string(room.Master),
-				PieceCount: room.PieceCount,
-				Players:    players,
-			}
-			err = SendMessage(client, resp)
-			if err != nil {
-				log.Println(err)
-				return
-			}
+				playerJoinedResp := PlayerJoinedResponse{ClientID: clientID}
+				msg, err := playerJoinedResp.Serialize()
+				if err != nil {
+					return
+				}
+				var b bytes.Buffer
+				b.WriteByte(byte(msg.Kind))
+				binary.Write(&b, binary.BigEndian, uint16(len(msg.Payload)))
+				if len(msg.Payload) != 0 {
+					b.Write(msg.Payload)
+				}
+				for _, roomClientID := range room.Clients {
+					roomClient := s.GetClient(roomClientID)
+					err := SendMessageRaw(roomClient, b.Bytes())
+					if err != nil {
+						continue
+					}
+				}
+				room.Clients = append(room.Clients, clientID)
+				client.RoomID = req.RoomID
+			}()
 		}
 	}
 }

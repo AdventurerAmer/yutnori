@@ -302,6 +302,13 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 	pieces_id := push_widget(&layout, "PIECES", padding)
 	pieces_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
 
+	player_ids := make([]int, game_state.room_player_count, context.temp_allocator)
+
+	for i in 0 ..< game_state.room_player_count {
+		player := game_state.players[i]
+		player_ids[i] = push_widget(&layout, fmt.ctprintf("%s", player.client_id))
+	}
+
 	push_widget(&layout, "", padding)
 
 	ready_unready_id: int
@@ -371,6 +378,11 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 		}
 
 		rl.GuiEnable()
+	}
+
+	for i in 0 ..< game_state.room_player_count {
+		w := get_widget(layout, player_ids[i])
+		rl.GuiLabel(w.rect, w.text)
 	}
 
 	{

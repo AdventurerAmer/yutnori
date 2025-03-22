@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:io"
 import "core:mem"
 import "core:net"
+import "core:reflect"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -76,7 +77,8 @@ Set_Piece_Count_Response :: struct {
 	should_set:  bool,
 	piece_count: i32,
 }
-Room_Master_Response :: struct {
+Player_Left_Response :: struct {
+	player: string,
 	master: string,
 }
 
@@ -86,7 +88,7 @@ Net_Response :: union {
 	Create_Room_Response,
 	Exit_Room_Response,
 	Set_Piece_Count_Response,
-	Room_Master_Response,
+	Player_Left_Response,
 	Join_Room_Response,
 	Player_Joined_Response,
 }
@@ -96,7 +98,7 @@ Net_Message_Type :: enum u8 {
 	CreateRoom,
 	ExitRoom,
 	SetPieceCount,
-	RoomMaster,
+	PlayerLeft,
 	JoinRoom,
 	PlayerJoined,
 }
@@ -268,7 +270,6 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 				break
 			}
 			push_net_response(game_state, Exit_Room_Response{exit = true})
-
 		case Set_Piece_Count_Request:
 			if socket == 0 {
 				break
@@ -302,14 +303,14 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 				payload = payload,
 			}
 
-			sync.lock(&net_state.mu)
-			delete(cmd.room_id, net_state.allocator)
-			sync.unlock(&net_state.mu)
-
 			if err := send_message(socket, msg); err != nil {
 				push_net_response(game_state, Join_Room_Response{})
 				break
 			}
+
+			sync.lock(&net_state.mu)
+			net_state.room_id = cmd.room_id
+			sync.unlock(&net_state.mu)
 		}
 	}
 }
@@ -428,24 +429,30 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 						piece_count = i32(resp.piece_count),
 					},
 				)
-			case .RoomMaster:
-				Room_Master :: struct {
+			case .PlayerLeft:
+				fmt.println("player left")
+				Player_Left :: struct {
+					player: string `json:"player"`,
 					master: string `json:"master"`,
 				}
-				resp := Room_Master{}
+				resp := Player_Left{}
 				if err := json.unmarshal(
 					msg.payload,
 					&resp,
 					json.DEFAULT_SPECIFICATION,
 					context.temp_allocator,
 				); err != nil {
-					push_net_response(game_state, Set_Piece_Count_Response{should_set = false})
+					push_net_response(game_state, Player_Left_Response{})
 					break
 				}
 				sync.lock(&net_state.mu)
 				master := strings.clone(resp.master, net_state.allocator)
+				player := strings.clone(resp.player, net_state.allocator)
 				sync.unlock(&net_state.mu)
-				push_net_response(game_state, Room_Master_Response{master = master})
+				push_net_response(
+					game_state,
+					Player_Left_Response{master = master, player = player},
+				)
 			case .JoinRoom:
 				fmt.println("join room")
 				resp := Join_Room_Response{}
@@ -465,18 +472,19 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 				fmt.println("player joined")
 				resp := Player_Joined_Response{}
 				sync.lock(&net_state.mu)
-				sync.unlock(&net_state.mu)
 				err := json.unmarshal(
 					msg.payload,
 					&resp,
 					json.DEFAULT_SPECIFICATION,
 					net_state.allocator,
 				)
+				sync.unlock(&net_state.mu)
 				if err != nil {
-					push_net_response(game_state, resp)
+					fmt.println(err)
+					push_net_response(game_state, Player_Joined_Response{})
 					break
 				}
-				push_net_response(game_state, {})
+				push_net_response(game_state, resp)
 			}
 		}
 	}
