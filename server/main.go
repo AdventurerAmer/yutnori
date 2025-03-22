@@ -143,7 +143,7 @@ func (j JoinRoomResponse) Serialize() (*Message, error) {
 		return nil, err
 	}
 	msg := &Message{
-		Kind:    MessageTypePlayerJoined,
+		Kind:    MessageTypeJoinRoom,
 		Payload: payload,
 	}
 	return msg, nil
@@ -159,7 +159,7 @@ func (j PlayerJoinedResponse) Serialize() (*Message, error) {
 		return nil, err
 	}
 	msg := &Message{
-		Kind:    MessageTypeJoinRoom,
+		Kind:    MessageTypePlayerJoined,
 		Payload: payload,
 	}
 	return msg, nil
@@ -487,6 +487,10 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 			log.Println("broad cast piece count:", req.PieceCount)
 			s.BroadcastMessage(room, SetPieceMessage{ShouldSet: true, PieceCount: req.PieceCount})
 		case MessageTypeJoinRoom:
+			if client.RoomID != "" {
+				log.Println("client is already in a room")
+				SendMessage(client, JoinRoomResponse{})
+			}
 			req := struct {
 				RoomID RoomID `json:"room_id"`
 			}{}
@@ -495,6 +499,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				log.Println(err)
 				return
 			}
+			log.Printf("client '%s' wants to join room '%s'\n", clientID, req.RoomID)
 			room := s.GetRoom(req.RoomID)
 			if room == nil { // room doesn't exist anymore
 				log.Println("room doesn't exist anymore")
@@ -516,10 +521,12 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				players = append(players, state)
 				err := SendMessage(roomClient, PlayerJoinedResponse{ClientID: roomClientID})
 				if err != nil {
+					log.Println(err)
 					return
 				}
 			}
 			room.mu.RUnlock()
+			log.Println("sent to room")
 			resp := JoinRoomResponse{
 				Join:       true,
 				Master:     string(room.Master),
@@ -528,6 +535,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 			}
 			err = SendMessage(client, resp)
 			if err != nil {
+				log.Println(err)
 				return
 			}
 		}

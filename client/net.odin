@@ -190,9 +190,8 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 		switch cmd in command {
 		case Connect_Request:
 			if socket != 0 do return
-			// @Bug: net.dial_tcp_from_hostname_and_port_string returns a socket (0) and err (nil) if the host is not reachable it should return socket (0) and err(net.Dial_Error) instead 
 			_socket, err := net.dial_tcp_from_hostname_and_port_string(SERVER_ADDRESS)
-			if err != nil || _socket == 0 {
+			if err != nil {
 				fmt.println(err)
 				push_net_response(game_state, Connect_Response{err, false})
 				break
@@ -302,10 +301,15 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 				kind    = .JoinRoom,
 				payload = payload,
 			}
-			send_message(socket, msg)
+
 			sync.lock(&net_state.mu)
 			delete(cmd.room_id, net_state.allocator)
 			sync.unlock(&net_state.mu)
+
+			if err := send_message(socket, msg); err != nil {
+				push_net_response(game_state, Join_Room_Response{})
+				break
+			}
 		}
 	}
 }
@@ -443,29 +447,32 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 				sync.unlock(&net_state.mu)
 				push_net_response(game_state, Room_Master_Response{master = master})
 			case .JoinRoom:
+				fmt.println("join room")
 				resp := Join_Room_Response{}
 				sync.lock(&net_state.mu)
-				defer sync.unlock(&net_state.mu)
-				if err := json.unmarshal(
+				err := json.unmarshal(
 					msg.payload,
 					&resp,
 					json.DEFAULT_SPECIFICATION,
 					net_state.allocator,
-				); err != nil {
-					push_net_response(game_state, resp)
-					break
+				)
+				sync.unlock(&net_state.mu)
+				if err != nil {
+					push_net_response(game_state, {})
 				}
-				push_net_response(game_state, {})
+				push_net_response(game_state, resp)
 			case .PlayerJoined:
+				fmt.println("player joined")
 				resp := Player_Joined_Response{}
 				sync.lock(&net_state.mu)
-				defer sync.unlock(&net_state.mu)
-				if err := json.unmarshal(
+				sync.unlock(&net_state.mu)
+				err := json.unmarshal(
 					msg.payload,
 					&resp,
 					json.DEFAULT_SPECIFICATION,
 					net_state.allocator,
-				); err != nil {
+				)
+				if err != nil {
 					push_net_response(game_state, resp)
 					break
 				}
