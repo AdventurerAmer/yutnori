@@ -235,6 +235,8 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 		case Quit_Request:
 			sync.lock(mu)
 			net_state.net_reciver_quit = true
+			net.close(socket)
+			socket = 0
 			sync.unlock(mu)
 			sync.sema_post(&net_state.net_receiver_sema)
 			break loop
@@ -274,6 +276,7 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 			}
 		}
 	}
+	fmt.println("sender finished")
 }
 
 receiver_thread_proc :: proc(t: ^thread.Thread) {
@@ -326,6 +329,7 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 			push_net_response(game_state, msg)
 		}
 	}
+	fmt.println("reciver finished")
 }
 
 push_net_request :: proc(game_state: ^Game_State, cmd: Net_Request) {

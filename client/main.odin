@@ -154,7 +154,7 @@ deinit_game :: proc(game_state: ^Game_State) {
 		delete(game_state.net_state.allocator_data)
 		free(game_state.net_state.allocator.data)
 	}
-	free(game_state, context.allocator)
+	free(game_state)
 }
 
 close_game :: proc(game_state: ^Game_State) {
