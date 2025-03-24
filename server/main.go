@@ -22,7 +22,10 @@ type Config struct {
 type MessageType uint8
 
 const (
-	MessageTypeClientID MessageType = iota
+	MessageTypeKeepalive MessageType = iota
+	MessageTypeConnect
+	MessageTypeDisconnect
+	MessageTypeQuit
 	MessageTypeCreateRoom
 	MessageTypeExitRoom
 	MessageTypeSetPieceCount
@@ -33,8 +36,14 @@ const (
 
 func (kind MessageType) String() string {
 	switch kind {
-	case MessageTypeClientID:
-		return "ClientID"
+	case MessageTypeKeepalive:
+		return "Keepalive"
+	case MessageTypeConnect:
+		return "Connect"
+	case MessageTypeDisconnect:
+		return "Disconnect"
+	case MessageTypeQuit:
+		return "Quit"
 	case MessageTypeCreateRoom:
 		return "CreateRoom"
 	case MessageTypeExitRoom:
@@ -60,24 +69,24 @@ type MessageSerializer interface {
 	Serialize() (*Message, error)
 }
 
-type ClientIDMessage struct {
-	ID string `json:"id"`
+type ConnectMessage struct {
+	ClientID ClientID `json:"client_id"`
 }
 
-func (c ClientIDMessage) Serialize() (*Message, error) {
+func (c ConnectMessage) Serialize() (*Message, error) {
 	payload, err := json.Marshal(c)
 	if err != nil {
 		return nil, err
 	}
 	msg := &Message{
-		Kind:    MessageTypeClientID,
+		Kind:    MessageTypeConnect,
 		Payload: payload,
 	}
 	return msg, nil
 }
 
 type CreateRoomMessage struct {
-	ID string `json:"id"`
+	RoomID string `json:"room_id"`
 }
 
 func (c CreateRoomMessage) Serialize() (*Message, error) {
@@ -132,6 +141,7 @@ type PlayerRoomState struct {
 }
 
 type JoinRoomResponse struct {
+	RoomID     RoomID            `json:"room_id"`
 	Join       bool              `json:"join"`
 	Master     string            `json:"master"`
 	PieceCount uint8             `json:"piece_count"`
@@ -425,8 +435,8 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 
 	log.Printf("%v connected\n", conn.RemoteAddr())
 
-	msg := ClientIDMessage{
-		ID: string(clientID),
+	msg := ConnectMessage{
+		ClientID: clientID,
 	}
 	err := SendMessage(client, msg)
 	if err != nil {
@@ -434,7 +444,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 		return
 	}
 
-	log.Printf("Sending ID '%s' to client '%s'\n", msg.ID, conn.RemoteAddr())
+	log.Printf("Sending ID '%s' to client '%s'\n", msg.ClientID, conn.RemoteAddr())
 
 	for {
 		msg, err := ReadMessage(conn)
@@ -449,7 +459,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				return
 			}
 			roomID := s.CreateRoom(clientID)
-			msg := CreateRoomMessage{ID: string(roomID)}
+			msg := CreateRoomMessage{RoomID: string(roomID)}
 			err := SendMessage(client, msg)
 			if err != nil {
 				return
@@ -544,6 +554,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				}
 				log.Println("sent to room")
 				resp := JoinRoomResponse{
+					RoomID:     req.RoomID,
 					Join:       true,
 					Master:     string(room.Master),
 					PieceCount: room.PieceCount,

@@ -99,10 +99,10 @@ Game_State :: struct {
 	debug_roll:                   i32,
 	net_sender_thread:            ^thread.Thread,
 	net_receiver_thread:          ^thread.Thread,
-	net_commands_queue:           queue.Queue(Net_Command),
+	net_commands_queue:           queue.Queue(Net_Request),
 	net_commands_queue_mutex:     sync.Mutex,
 	net_commands_semaphore:       sync.Sema,
-	net_response_queue:           queue.Queue(Net_Response),
+	net_response_queue:           queue.Queue(Net_Message),
 	net_response_queue_mutex:     sync.Mutex,
 	connected:                    bool,
 	is_trying_to_connect:         bool,
@@ -120,6 +120,7 @@ Game_State :: struct {
 	is_trying_to_unready:         bool,
 	is_trying_to_start:           bool,
 	is_ready:                     bool,
+	room_id:                      string,
 	net_state:                    Net_State,
 }
 
@@ -132,17 +133,24 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 }
 
 deinit_game :: proc(game_state: ^Game_State) {
+	if game_state.room_id != "" {
+		delete(game_state.room_id)
+	}
+	for i in 0 ..< MAX_PLAYER_COUNT {
+		if game_state.players[i].client_id == "" do continue
+		delete(game_state.players[i].client_id)
+		game_state.players[i].client_id = ""
+	}
 	delete(game_state.rolls)
 	delete(game_state.players)
 	if game_state.net_sender_thread != nil {
-		push_net_cmd(game_state, Quit_Request{})
+		push_net_request(game_state, Quit_Request{})
 		thread.join(game_state.net_sender_thread)
 		thread.join(game_state.net_receiver_thread)
 		thread.destroy(game_state.net_sender_thread)
 		thread.destroy(game_state.net_receiver_thread)
 		queue.destroy(&game_state.net_commands_queue)
 		queue.destroy(&game_state.net_response_queue)
-
 		delete(game_state.net_state.allocator_data)
 		free(game_state.net_state.allocator.data)
 	}
@@ -572,107 +580,11 @@ main :: proc() {
 		i32(rl.GuiDefaultProperty.TEXT_SPACING),
 		i32(default_style.font_spacing),
 	)
-
 	for game_state.running {
 		free_all(context.temp_allocator)
 
-		if game_state.net_sender_thread != nil {
-			sync.lock(&game_state.net_response_queue_mutex)
-			for queue.len(game_state.net_response_queue) != 0 {
-				response := queue.pop_front(&game_state.net_response_queue)
-				switch resp in response {
-				case Connect_Response:
-					game_state.is_trying_to_connect = false
-					net_state := &game_state.net_state
-					sync.lock(&net_state.mu)
-					client_id := strings.clone(net_state.client_id)
-					sync.unlock(&net_state.mu)
-					if resp.connected {
-						game_state.connected = true
-						game_state.players[0].client_id = client_id
-						game_state.room_player_count = 1
-					}
-				case Disconnect_Response:
-					if game_state.connected {
-						game_state.connected = false
-						game_state.in_room = false
-						game_state.is_room_master = false
-						game_state.is_ready = false
-						game_state.room_player_count = 1
-						game_state.screen_state = .MainMenu
-					}
-				case Create_Room_Response:
-					game_state.is_trying_to_create_room = false
-					if resp.created {
-						game_state.in_room = true
-						game_state.is_room_master = true
-						game_state.room_piece_count = 2
-						game_state.room_player_count = 1
-						game_state.room_ready_player_count = 0
-						game_state.screen_state = .Room
-					}
-				case Exit_Room_Response:
-					if resp.exit {
-						game_state.in_room = false
-						game_state.is_room_master = false
-						game_state.is_ready = false
-						if game_state.screen_state == .Room {
-							game_state.screen_state = .MultiplayerGameMode
-						}
-					}
-					game_state.is_trying_to_exit_room = false
-				case Set_Piece_Count_Response:
-					if resp.should_set {
-						game_state.room_piece_count = resp.piece_count
-					}
-					game_state.is_trying_to_set_piece_count = false
-				case Player_Left_Response:
-					fmt.println("player_left")
-					net_state := &game_state.net_state
-					sync.lock(&net_state.mu)
-					game_state.is_room_master = net_state.client_id == resp.master
-					delete(resp.master, net_state.allocator)
-					for i in 1 ..< game_state.room_player_count {
-						if game_state.players[i].client_id == resp.player {
-							game_state.players[i] =
-								game_state.players[game_state.room_player_count - 1]
-							break
-						}
-					}
-					game_state.room_player_count -= 1
-					sync.unlock(&net_state.mu)
-				case Join_Room_Response:
-					game_state.is_trying_to_join_room = false
-					if resp.join {
-						net_state := &game_state.net_state
-						game_state.in_room = true
-						game_state.is_room_master = resp.master == game_state.players[0].client_id
-						game_state.room_piece_count = i32(resp.piece_count)
-						game_state.room_ready_player_count = 0
-						for p in resp.players {
-							if p.is_ready do game_state.room_ready_player_count += 1
-							idx := game_state.room_player_count
-							fmt.println("idx", idx)
-							game_state.players[idx].client_id = strings.clone(p.client_id)
-							game_state.room_player_count += 1
-						}
-						game_state.screen_state = .Room
-					} else {
-						net_state := &game_state.net_state
-						sync.lock(&net_state.mu)
-						delete(net_state.room_id, net_state.allocator)
-						net_state.room_id = ""
-						sync.unlock(&net_state.mu)
-					}
-				case Player_Joined_Response:
-					client_id := strings.clone(resp.client_id)
-					fmt.println("player joined", client_id, game_state.room_player_count)
-					game_state.players[game_state.room_player_count].client_id = client_id
-					game_state.room_player_count += 1
-				}
-			}
-			sync.unlock(&game_state.net_response_queue_mutex)
-		}
+		handle_net_responses(game_state)
+
 		if rl.WindowShouldClose() {
 			close_game(game_state)
 		}
@@ -1338,5 +1250,137 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 				rl.DrawTextEx(style.font, text, center, font_size, style.font_spacing, rl.WHITE)
 			}
 		}
+	}
+}
+
+handle_net_responses :: proc(game_state: ^Game_State) {
+	if game_state.net_sender_thread == nil do return
+	net_state := &game_state.net_state
+	sync.lock(&game_state.net_response_queue_mutex)
+	if queue.len(game_state.net_response_queue) == 0 {
+		sync.unlock(&game_state.net_response_queue_mutex)
+		return
+	}
+	msg := queue.pop_front(&game_state.net_response_queue)
+	sync.unlock(&game_state.net_response_queue_mutex)
+	defer {
+		sync.lock(&net_state.allocator_mu)
+		delete(msg.payload, net_state.allocator)
+		sync.unlock(&net_state.allocator_mu)
+	}
+	switch msg.kind {
+	case .Keepalive:
+		fmt.println("keepalive response")
+	case .Connect:
+		fmt.println("connect response")
+		game_state.is_trying_to_connect = false
+		resp := Connect_Response{}
+		parse_msg(msg, &resp)
+		if resp.client_id != "" {
+			game_state.connected = true
+			game_state.players[0].client_id = strings.clone(resp.client_id)
+		}
+	case .Disconnect:
+		fmt.println("disconnect response")
+		resp := Disconnect_Response{}
+		parse_msg(msg, &resp)
+		if game_state.connected {
+			game_state.connected = false
+			game_state.in_room = false
+			game_state.is_room_master = false
+			game_state.is_ready = false
+			for i in 0 ..< MAX_PLAYER_COUNT {
+				if game_state.players[i].client_id == "" do continue
+				delete(game_state.players[i].client_id)
+				game_state.players[i].client_id = ""
+			}
+			delete(game_state.room_id)
+			game_state.room_id = ""
+			game_state.room_player_count = 0
+			game_state.room_piece_count = 2
+			game_state.screen_state = .MainMenu
+		}
+	case .Quit:
+	case .CreateRoom:
+		game_state.is_trying_to_create_room = false
+		resp := Create_Room_Response{}
+		parse_msg(msg, &resp)
+		if resp.room_id != "" {
+			game_state.in_room = true
+			game_state.is_room_master = true
+			game_state.room_piece_count = 2
+			game_state.room_player_count = 1
+			game_state.room_ready_player_count = 0
+			game_state.screen_state = .Room
+			game_state.room_id = strings.clone(resp.room_id)
+		}
+	case .ExitRoom:
+		game_state.is_trying_to_exit_room = false
+		resp := Exit_Room_Response{}
+		parse_msg(msg, &resp)
+		if resp.exit {
+			game_state.in_room = false
+			game_state.is_room_master = false
+			game_state.is_ready = false
+			game_state.room_player_count = 0
+			game_state.room_ready_player_count = 0
+			game_state.room_piece_count = 2
+
+			for i in 0 ..< MAX_PLAYER_COUNT {
+				if game_state.players[i].client_id == "" do continue
+				delete(game_state.players[i].client_id)
+				game_state.players[i].client_id = ""
+			}
+
+			delete(game_state.room_id)
+			game_state.room_id = ""
+
+			if game_state.screen_state == .Room {
+				game_state.screen_state = .MultiplayerGameMode
+			}
+		}
+	case .SetPieceCount:
+		game_state.is_trying_to_set_piece_count = false
+		resp := Set_Piece_Count_Response{}
+		parse_msg(msg, &resp)
+		if resp.should_set {
+			game_state.room_piece_count = resp.piece_count
+		}
+	case .PlayerLeft:
+		resp := Player_Left_Response{}
+		parse_msg(msg, &resp)
+		game_state.is_room_master = game_state.players[0].client_id == resp.master
+		for i in 1 ..< game_state.room_player_count {
+			if game_state.players[i].client_id == resp.player {
+				delete(game_state.players[i].client_id)
+				game_state.players[i].client_id = ""
+				game_state.players[i] = game_state.players[game_state.room_player_count - 1]
+				break
+			}
+		}
+		game_state.room_player_count -= 1
+	case .JoinRoom:
+		resp := Join_Room_Response{}
+		parse_msg(msg, &resp)
+		game_state.is_trying_to_join_room = false
+		if resp.join {
+			game_state.in_room = true
+			game_state.is_room_master = resp.master == game_state.players[0].client_id
+			game_state.room_piece_count = i32(resp.piece_count)
+			game_state.room_ready_player_count = 0
+			for p in resp.players {
+				if p.is_ready do game_state.room_ready_player_count += 1
+				idx := game_state.room_player_count
+				game_state.players[idx].client_id = strings.clone(p.client_id)
+				game_state.room_player_count += 1
+			}
+			game_state.screen_state = .Room
+			game_state.room_id = strings.clone(resp.room_id)
+		}
+	case .PlayerJoined:
+		resp := Player_Joined_Response{}
+		parse_msg(msg, &resp)
+		game_state.players[game_state.room_player_count].client_id = strings.clone(resp.client_id)
+		game_state.room_player_count += 1
 	}
 }

@@ -294,7 +294,7 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 	padding := Vec2{0.01, 0.01} * screen_size
 
 	room_label_id := push_widget(&layout, "ROOM", padding)
-	room_id_text := fmt.ctprintf("%s", game_state.net_state.room_id)
+	room_id_text := fmt.ctprintf("%s", game_state.room_id)
 	room_id := push_widget(&layout, room_id_text, padding)
 
 	push_widget(&layout, "", padding)
