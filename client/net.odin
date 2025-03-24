@@ -35,6 +35,8 @@ Net_Message_Type :: enum u8 {
 	PlayerLeft,
 	JoinRoom,
 	PlayerJoined,
+	Ready,
+	KickPlayer,
 }
 
 Net_Message :: struct {
@@ -55,6 +57,13 @@ Join_Room_Request :: struct {
 	room_id: string `json:"room_id"`,
 }
 
+Kick_Player_Request :: struct {
+	player: string `json:"player"`,
+}
+Ready_Request :: struct {
+	is_ready: bool `json:"is_ready"`,
+}
+
 Net_Request :: union {
 	Connect_Request,
 	Disconnect_Request,
@@ -63,6 +72,8 @@ Net_Request :: union {
 	Exit_Room_Request,
 	Set_Piece_Count_Request,
 	Join_Room_Request,
+	Ready_Request,
+	Kick_Player_Request,
 }
 
 Connect_Response :: struct {
@@ -83,6 +94,7 @@ Set_Piece_Count_Response :: struct {
 Player_Left_Response :: struct {
 	player: string `json:"player"`,
 	master: string `json:"master"`,
+	kicked: bool `json:"kicked"`,
 }
 Player_Room_State :: struct {
 	client_id: string `json:"client_id"`,
@@ -96,6 +108,15 @@ Join_Room_Response :: struct {
 	players:     []Player_Room_State `json:"players"`,
 }
 Player_Joined_Response :: struct {
+	client_id: string `json:"client_id"`,
+}
+
+Player_Ready_Response :: struct {
+	player:   string `json:"player"`,
+	is_ready: bool `json:"is_ready"`,
+}
+
+Player_Kicked_Response :: struct {
 	client_id: string `json:"client_id"`,
 }
 
@@ -274,6 +295,21 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 				push_net_response(game_state, compose_net_msg(.JoinRoom, Join_Room_Response{}))
 				break
 			}
+		case Ready_Request:
+			if socket == 0 do break
+			if err := send_message(socket, Net_Message{kind = .Ready, payload = msg_payload});
+			   err != nil {
+				push_net_response(game_state, compose_net_msg(.JoinRoom, Player_Ready_Response{}))
+				break
+			}
+		case Kick_Player_Request:
+			if socket == 0 do break
+			fmt.println("kick player request")
+			if err := send_message(socket, Net_Message{kind = .KickPlayer, payload = msg_payload});
+			   err != nil {
+				push_net_response(game_state, compose_net_msg(.PlayerLeft, Player_Left_Response{}))
+				break
+			}
 		}
 	}
 	fmt.println("sender finished")
@@ -398,23 +434,38 @@ create_room :: proc(game_state: ^Game_State) {
 }
 
 exit_room :: proc(game_state: ^Game_State) {
-	if !game_state.connected || !game_state.in_room do return
+	if !game_state.connected || game_state.room_id == "" do return
 	game_state.is_trying_to_exit_room = true
 	push_net_request(game_state, Exit_Room_Request{})
 }
 
 set_piece_count :: proc(game_state: ^Game_State, piece_count: i32) {
-	if !game_state.connected || !game_state.in_room || !game_state.is_room_master do return
+	if !game_state.connected || game_state.room_id == "" || !game_state.is_room_master do return
 	game_state.is_trying_to_set_piece_count = true
 	push_net_request(game_state, Set_Piece_Count_Request{piece_count = piece_count})
 }
 
 join_room :: proc(game_state: ^Game_State, room_id: string) {
-	if !game_state.connected || game_state.in_room do return
+	if !game_state.connected || game_state.room_id != "" do return
 	game_state.is_trying_to_join_room = true
 	net_state := &game_state.net_state
 	sync.lock(&net_state.mu)
 	s := strings.clone(room_id, net_state.allocator)
 	sync.unlock(&net_state.mu)
 	push_net_request(game_state, Join_Room_Request{room_id = s})
+}
+
+change_ready_state :: proc(game_state: ^Game_State, is_ready: bool) {
+	if !game_state.connected || game_state.room_id == "" do return
+	game_state.is_trying_to_change_ready_state = true
+	push_net_request(game_state, Ready_Request{is_ready = is_ready})
+}
+
+kick_player :: proc(game_state: ^Game_State, player_idx: int) {
+	if !game_state.connected || game_state.room_id == "" || !game_state.is_room_master do return
+	game_state.is_trying_to_kick_player_set += {player_idx}
+	push_net_request(
+		game_state,
+		Kick_Player_Request{player = game_state.players[player_idx].client_id},
+	)
 }

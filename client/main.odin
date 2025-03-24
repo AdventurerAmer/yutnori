@@ -62,8 +62,7 @@ Draw_State :: struct {
 }
 
 Action :: enum {
-	Unready,
-	Ready,
+	InRoom,
 	GameStarted,
 	GameEnded,
 	BeginTurn,
@@ -77,51 +76,49 @@ Action :: enum {
 }
 
 Game_State :: struct {
-	running:                      bool,
-	screen_state:                 Screen_State,
-	is_paused:                    bool,
-	draw_state:                   Draw_State,
-	piece_count:                  i32,
-	player_count:                 i32,
-	players:                      [dynamic]Player_State,
-	player_turn_index:            i32,
-	player_won_index:             i32,
-	rolls:                        [dynamic]i32,
-	selected_piece_index:         i32,
-	current_action:               Action,
-	should_roll:                  bool,
-	target_move:                  Move,
-	target_piece:                 i32,
-	target_position:              Vec2,
-	target_position_percent:      f32,
-	move_seq_idx:                 i32,
-	use_debug_roll:               bool,
-	debug_roll:                   i32,
-	net_sender_thread:            ^thread.Thread,
-	net_receiver_thread:          ^thread.Thread,
-	net_commands_queue:           queue.Queue(Net_Request),
-	net_commands_queue_mutex:     sync.Mutex,
-	net_commands_semaphore:       sync.Sema,
-	net_response_queue:           queue.Queue(Net_Message),
-	net_response_queue_mutex:     sync.Mutex,
-	connected:                    bool,
-	is_trying_to_connect:         bool,
-	connection_timer:             f32,
-	is_trying_to_create_room:     bool,
-	in_room:                      bool,
-	is_room_master:               bool,
-	is_trying_to_exit_room:       bool,
-	room_piece_count:             i32,
-	is_trying_to_join_room:       bool,
-	room_ready_player_count:      i32,
-	is_trying_to_set_piece_count: bool,
-	room_player_count:            i32,
-	is_trying_to_ready:           bool,
-	is_trying_to_unready:         bool,
-	is_trying_to_start:           bool,
-	is_ready:                     bool,
-	room_id:                      string,
-	net_state:                    Net_State,
+	running:                         bool,
+	screen_state:                    Screen_State,
+	is_paused:                       bool,
+	draw_state:                      Draw_State,
+	piece_count:                     i32,
+	player_count:                    i32,
+	players:                         [dynamic]Player_State,
+	player_turn_index:               i32,
+	player_won_index:                i32,
+	rolls:                           [dynamic]i32,
+	selected_piece_index:            i32,
+	current_action:                  Action,
+	should_roll:                     bool,
+	target_move:                     Move,
+	target_piece:                    i32,
+	target_position:                 Vec2,
+	target_position_percent:         f32,
+	move_seq_idx:                    i32,
+	use_debug_roll:                  bool,
+	debug_roll:                      i32,
+	net_sender_thread:               ^thread.Thread,
+	net_receiver_thread:             ^thread.Thread,
+	net_commands_queue:              queue.Queue(Net_Request),
+	net_commands_queue_mutex:        sync.Mutex,
+	net_commands_semaphore:          sync.Sema,
+	net_response_queue:              queue.Queue(Net_Message),
+	net_response_queue_mutex:        sync.Mutex,
+	connected:                       bool,
+	is_trying_to_connect:            bool,
+	connection_timer:                f32,
+	is_trying_to_create_room:        bool,
+	room_id:                         string,
+	is_room_master:                  bool,
+	is_trying_to_exit_room:          bool,
+	room_piece_count:                i32,
+	is_trying_to_join_room:          bool,
+	room_ready_player_count:         i32,
+	is_trying_to_set_piece_count:    bool,
+	room_player_count:               i32,
+	is_trying_to_change_ready_state: bool,
+	is_trying_to_kick_player_set:    bit_set[0 ..< MAX_PLAYER_COUNT;int],
+	is_trying_to_start_game:         bool,
+	net_state:                       Net_State,
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -191,26 +188,14 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	resize(&game_state.rolls, 0)
 	game_state.is_paused = false
 	game_state.selected_piece_index = -1
-	game_state.current_action = .Unready
+	game_state.current_action = .InRoom
 	game_state.should_roll = false
 	game_state.use_debug_roll = true
 	game_state.debug_roll = 1
 }
 
-ready :: proc(game_state: ^Game_State) {
-	if game_state.current_action == .Unready {
-		game_state.current_action = .Ready
-	}
-}
-
-unready :: proc(game_state: ^Game_State) {
-	if game_state.current_action == .Ready {
-		game_state.current_action = .Unready
-	}
-}
-
 start_game :: proc(game_state: ^Game_State) {
-	if game_state.current_action == .Ready {
+	if game_state.current_action == .InRoom {
 		game_state.player_turn_index = rand.int31_max(game_state.player_count)
 		game_state.current_action = .GameStarted
 	}
@@ -571,7 +556,7 @@ main :: proc() {
 
 	default_style := UI_Style {
 		font         = rl.GetFontDefault(),
-		font_size    = f32(36),
+		font_size    = f32(32),
 		font_spacing = f32(2),
 	}
 	rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SIZE), i32(default_style.font_size))
@@ -672,9 +657,7 @@ main :: proc() {
 			piece_size := draw_state.piece_size
 
 			switch game_state.current_action {
-			case .Unready:
-				ready(game_state)
-			case .Ready:
+			case .InRoom:
 				fmt.println("ready")
 				start_game(game_state)
 			case .GameStarted:
@@ -1286,9 +1269,7 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		parse_msg(msg, &resp)
 		if game_state.connected {
 			game_state.connected = false
-			game_state.in_room = false
 			game_state.is_room_master = false
-			game_state.is_ready = false
 			for i in 0 ..< MAX_PLAYER_COUNT {
 				if game_state.players[i].client_id == "" do continue
 				delete(game_state.players[i].client_id)
@@ -1306,7 +1287,6 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		resp := Create_Room_Response{}
 		parse_msg(msg, &resp)
 		if resp.room_id != "" {
-			game_state.in_room = true
 			game_state.is_room_master = true
 			game_state.room_piece_count = 2
 			game_state.room_player_count = 1
@@ -1319,14 +1299,12 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		resp := Exit_Room_Response{}
 		parse_msg(msg, &resp)
 		if resp.exit {
-			game_state.in_room = false
 			game_state.is_room_master = false
-			game_state.is_ready = false
 			game_state.room_player_count = 0
 			game_state.room_ready_player_count = 0
 			game_state.room_piece_count = 2
 
-			for i in 0 ..< MAX_PLAYER_COUNT {
+			for i in 1 ..< MAX_PLAYER_COUNT {
 				if game_state.players[i].client_id == "" do continue
 				delete(game_state.players[i].client_id)
 				game_state.players[i].client_id = ""
@@ -1349,25 +1327,42 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 	case .PlayerLeft:
 		resp := Player_Left_Response{}
 		parse_msg(msg, &resp)
+		fmt.println(resp, game_state.players[0].client_id)
 		game_state.is_room_master = game_state.players[0].client_id == resp.master
-		for i in 1 ..< game_state.room_player_count {
+		for i in 0 ..< int(game_state.room_player_count) {
 			if game_state.players[i].client_id == resp.player {
-				delete(game_state.players[i].client_id)
-				game_state.players[i].client_id = ""
-				game_state.players[i] = game_state.players[game_state.room_player_count - 1]
+				if i == 0 {
+					game_state.room_player_count = 0
+					game_state.room_ready_player_count = 0
+					game_state.room_piece_count = 2
+
+					delete(game_state.room_id)
+					game_state.room_id = ""
+
+					if game_state.screen_state == .Room {
+						game_state.screen_state = .MultiplayerGameMode
+					}
+					if resp.kicked {
+						game_state.is_trying_to_kick_player_set -= {i}
+					}
+				} else {
+					delete(game_state.players[i].client_id)
+					game_state.players[i].client_id = ""
+					game_state.players[i] = game_state.players[game_state.room_player_count - 1]
+					game_state.room_player_count -= 1
+				}
 				break
 			}
 		}
-		game_state.room_player_count -= 1
 	case .JoinRoom:
 		resp := Join_Room_Response{}
 		parse_msg(msg, &resp)
 		game_state.is_trying_to_join_room = false
 		if resp.join {
-			game_state.in_room = true
 			game_state.is_room_master = resp.master == game_state.players[0].client_id
 			game_state.room_piece_count = i32(resp.piece_count)
 			game_state.room_ready_player_count = 0
+			game_state.room_player_count = 1
 			for p in resp.players {
 				if p.is_ready do game_state.room_ready_player_count += 1
 				idx := game_state.room_player_count
@@ -1382,5 +1377,25 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		parse_msg(msg, &resp)
 		game_state.players[game_state.room_player_count].client_id = strings.clone(resp.client_id)
 		game_state.room_player_count += 1
+	case .KickPlayer:
+	case .Ready:
+		resp := Player_Ready_Response{}
+		parse_msg(msg, &resp)
+		fmt.println("ready", resp, game_state.players[0].client_id)
+		for i in 0 ..< MAX_PLAYER_COUNT {
+			if game_state.players[i].client_id == resp.player {
+				if i == 0 {
+					game_state.is_trying_to_change_ready_state = false
+				}
+				game_state.players[i].is_ready = resp.is_ready
+				break
+			}
+		}
+		if resp.is_ready {
+			game_state.room_ready_player_count += 1
+		} else {
+			game_state.room_ready_player_count -= 1
+		}
+		fmt.println("ready count", game_state.room_ready_player_count)
 	}
 }

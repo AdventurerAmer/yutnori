@@ -254,8 +254,7 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 			copy(text_buffer[:MAX_INPUT_CHARS], transmute([]u8)clipboard)
 		}
 		c_text := cast(cstring)&text_buffer[0]
-		if rl.GuiTextBox(w.rect, c_text, MAX_INPUT_CHARS, true) {
-		}
+		rl.GuiTextBox(w.rect, c_text, MAX_INPUT_CHARS, true)
 	}
 
 	{
@@ -302,17 +301,37 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 	pieces_id := push_widget(&layout, "PIECES", padding)
 	pieces_spinner_id := push_widget(&layout, "", screen_size * Vec2{0.1, 0.05})
 
-	player_ids := make([]int, game_state.room_player_count, context.temp_allocator)
+	push_widget(&layout, "", padding)
+
+	Player_UI_State :: struct {
+		label:    int,
+		is_ready: int,
+		kick:     int,
+	}
+
+	players_label_id := push_widget(&layout, "PLAYERS", padding)
+	player_ui_states := make(
+		[]Player_UI_State,
+		game_state.room_player_count,
+		context.temp_allocator,
+	)
 
 	for i in 0 ..< game_state.room_player_count {
 		player := game_state.players[i]
-		player_ids[i] = push_widget(&layout, fmt.ctprintf("%s", player.client_id))
+		ui_state := &player_ui_states[i]
+		ui_state.label = push_widget(&layout, fmt.ctprintf("P%d-%s", i + 1, player.client_id[:8]))
+		ui_state.is_ready = push_widget(
+			&layout,
+			fmt.ctprintf("%s", player.is_ready ? "READY" : "UNREADY"),
+		)
+		ui_state.kick = push_widget(&layout, "KICK")
+		push_widget(&layout, "")
 	}
 
 	push_widget(&layout, "", padding)
 
 	ready_unready_id: int
-	if game_state.is_ready {
+	if game_state.players[0].is_ready {
 		ready_unready_id = push_widget(&layout, "UNREADY", padding)
 	} else {
 		ready_unready_id = push_widget(&layout, "READY", padding)
@@ -334,6 +353,11 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 		if rl.GuiLabelButton(w.rect, w.text) {
 			rl.SetClipboardText(room_id_text)
 		}
+	}
+
+	{
+		w := get_widget(layout, players_label_id)
+		rl.GuiLabel(w.rect, w.text)
 	}
 
 	{
@@ -367,33 +391,55 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 			}
 		}
 
-		if game_state.room_player_count != game_state.room_ready_player_count {
+		if game_state.room_player_count != game_state.room_ready_player_count ||
+		   !game_state.is_room_master {
 			rl.GuiDisable()
 		}
 
 		{
 			w := get_widget(layout, start_id)
 			if rl.GuiButton(w.rect, w.text) {
+				start_game(game_state)
 			}
 		}
 
 		rl.GuiEnable()
 	}
 
-	for i in 0 ..< game_state.room_player_count {
-		w := get_widget(layout, player_ids[i])
-		rl.GuiLabel(w.rect, w.text)
+	for player_idx in 1 ..< int(game_state.room_player_count) {
+		ui_state := player_ui_states[player_idx]
+		{
+			w := get_widget(layout, ui_state.label)
+			rl.GuiLabel(w.rect, w.text)
+		}
+		{
+			w := get_widget(layout, ui_state.is_ready)
+			rl.GuiLabel(w.rect, w.text)
+		}
+		{
+			if player_idx in game_state.is_trying_to_kick_player_set ||
+			   !game_state.is_room_master {
+				rl.GuiDisable()
+			}
+			w := get_widget(layout, ui_state.kick)
+			if rl.GuiButton(w.rect, w.text) {
+				kick_player(game_state, player_idx)
+			}
+			rl.GuiEnable()
+		}
 	}
 
 	{
+		if game_state.is_trying_to_change_ready_state {
+			rl.GuiDisable()
+		}
+
 		w := get_widget(layout, ready_unready_id)
 		if rl.GuiButton(w.rect, w.text) {
-			if game_state.is_ready {
-				game_state.is_ready = false
-			} else {
-				game_state.is_ready = true
-			}
+			change_ready_state(game_state, !game_state.players[0].is_ready)
 		}
+
+		rl.GuiEnable()
 	}
 
 	{

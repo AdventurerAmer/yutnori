@@ -32,33 +32,9 @@ const (
 	MessageTypePlayerLeft
 	MessageTypeJoinRoom
 	MessageTypePlayerJoined
+	MessageTypePlayerReady
+	MessageTypeKickPlayer
 )
-
-func (kind MessageType) String() string {
-	switch kind {
-	case MessageTypeKeepalive:
-		return "Keepalive"
-	case MessageTypeConnect:
-		return "Connect"
-	case MessageTypeDisconnect:
-		return "Disconnect"
-	case MessageTypeQuit:
-		return "Quit"
-	case MessageTypeCreateRoom:
-		return "CreateRoom"
-	case MessageTypeExitRoom:
-		return "ExitRoom"
-	case MessageTypeSetPieceCount:
-		return "SetPieceCount"
-	case MessageTypePlayerLeft:
-		return "PlayerLeft"
-	case MessageTypeJoinRoom:
-		return "JoinRoom"
-	case MessageTypePlayerJoined:
-		return "PlayerJoined"
-	}
-	return "Unsupported"
-}
 
 type Message struct {
 	Kind    MessageType
@@ -121,6 +97,7 @@ func (c SetPieceMessage) Serialize() (*Message, error) {
 type PlayerLeftMessage struct {
 	Player ClientID `json:"player"`
 	Master ClientID `json:"master"`
+	Kicked bool     `json:"kicked"`
 }
 
 func (c PlayerLeftMessage) Serialize() (*Message, error) {
@@ -171,6 +148,23 @@ func (j PlayerJoinedResponse) Serialize() (*Message, error) {
 	}
 	msg := &Message{
 		Kind:    MessageTypePlayerJoined,
+		Payload: payload,
+	}
+	return msg, nil
+}
+
+type PlayerReadyResponse struct {
+	Player  ClientID `json:"player"`
+	IsReady bool     `json:"is_ready"`
+}
+
+func (p PlayerReadyResponse) Serialize() (*Message, error) {
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
+	msg := &Message{
+		Kind:    MessageTypePlayerReady,
 		Payload: payload,
 	}
 	return msg, nil
@@ -382,41 +376,49 @@ func (s *Server) RemoveRoom(roomID RoomID) {
 	delete(s.rooms, roomID)
 }
 
-func (s *Server) ExitRoom(roomID RoomID, clientID ClientID) error {
+func (s *Server) ExitRoom(roomID RoomID, clientID ClientID, kicked bool) error {
 	room := s.GetRoom(roomID)
 	if room == nil {
 		return fmt.Errorf("room doesn't exist")
 	}
 	room.mu.Lock()
 	defer room.mu.Unlock()
+
+	clientCount := len(room.Clients)
 	for idx, client := range room.Clients {
 		if client == clientID {
-			room.Clients = append(room.Clients[:idx], room.Clients[idx+1:]...)
+			room.Clients[idx], room.Clients[clientCount-1] = room.Clients[clientCount-1], room.Clients[idx]
 			break
 		}
 	}
-	clientCount := len(room.Clients)
-	if clientCount != 0 {
+
+	if clientCount-1 > 0 {
 		masterIdx := random.Int31n(int32(clientCount))
 		room.Master = room.Clients[masterIdx]
-		playerLeftMsg := PlayerLeftMessage{Master: room.Master, Player: clientID}
-		msg, err := playerLeftMsg.Serialize()
-		if err != nil {
-			return err
+	} else {
+		room.Master = ""
+	}
+
+	playerLeftMsg := PlayerLeftMessage{Master: room.Master, Player: clientID, Kicked: kicked}
+	msg, err := playerLeftMsg.Serialize()
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	b.WriteByte(byte(msg.Kind))
+	binary.Write(&b, binary.BigEndian, uint16(len(msg.Payload)))
+	if len(msg.Payload) != 0 {
+		b.Write(msg.Payload)
+	}
+	for _, clientID := range room.Clients {
+		client := s.GetClient(clientID)
+		if client == nil {
+			continue
 		}
-		var b bytes.Buffer
-		b.WriteByte(byte(msg.Kind))
-		binary.Write(&b, binary.BigEndian, uint16(len(msg.Payload)))
-		if len(msg.Payload) != 0 {
-			b.Write(msg.Payload)
-		}
-		for _, clientID := range room.Clients {
-			client := s.GetClient(clientID)
-			if client == nil {
-				continue
-			}
-			SendMessageRaw(client, b.Bytes())
-		}
+		SendMessageRaw(client, b.Bytes())
+	}
+	if clientCount-1 > 0 {
+		room.Clients = room.Clients[:clientCount-1]
 	}
 	return nil
 }
@@ -426,7 +428,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 
 	defer func() {
 		if client.RoomID != "" {
-			s.ExitRoom(client.RoomID, clientID)
+			s.ExitRoom(client.RoomID, clientID, false)
 		}
 		s.RemoveClient(clientID)
 		conn.Close()
@@ -452,6 +454,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 			log.Println(err)
 			return
 		}
+		log.Println("msg", msg.Kind)
 
 		switch msg.Kind {
 		case MessageTypeCreateRoom:
@@ -471,7 +474,7 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 			if client.RoomID == "" {
 				continue
 			}
-			err := s.ExitRoom(client.RoomID, clientID)
+			err := s.ExitRoom(client.RoomID, clientID, false)
 			if err != nil {
 				log.Println(err)
 			}
@@ -586,6 +589,51 @@ func (s *Server) HandleClient(clientID ClientID, client *Client) {
 				room.Clients = append(room.Clients, clientID)
 				client.RoomID = req.RoomID
 			}()
+		case MessageTypePlayerReady:
+			log.Println("Ready/Unready Request...")
+			req := struct {
+				IsReady bool `json:"is_ready"`
+			}{}
+			err := json.Unmarshal(msg.Payload, &req)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			client.mu.Lock()
+			client.IsReady = req.IsReady
+			client.mu.Unlock()
+			room := s.GetRoom(client.RoomID)
+			err = s.BroadcastMessage(room, PlayerReadyResponse{Player: clientID, IsReady: req.IsReady})
+			if err != nil {
+				log.Println(err)
+				return
+			}
+		case MessageTypeKickPlayer:
+			room := s.GetRoom(client.RoomID)
+			if room == nil {
+				log.Println("Room is nil")
+				break
+			}
+			client.mu.Lock()
+			if client.RoomID == "" || room.Master != clientID {
+				log.Println("Player is not in a room or he is not master")
+				client.mu.Unlock()
+				break
+			}
+			client.mu.Unlock()
+			req := struct {
+				Player ClientID `json:"player"`
+			}{}
+			err := json.Unmarshal(msg.Payload, &req)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			err = s.ExitRoom(client.RoomID, req.Player, true)
+			if err != nil {
+				log.Println(err)
+				return
+			}
 		}
 	}
 }
