@@ -130,14 +130,7 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 }
 
 deinit_game :: proc(game_state: ^Game_State) {
-	if game_state.room_id != "" {
-		delete(game_state.room_id)
-	}
-	for i in 0 ..< MAX_PLAYER_COUNT {
-		if game_state.players[i].client_id == "" do continue
-		delete(game_state.players[i].client_id)
-		game_state.players[i].client_id = ""
-	}
+	reset_net_state(game_state)
 	delete(game_state.rolls)
 	delete(game_state.players)
 	if game_state.net_sender_thread != nil {
@@ -148,8 +141,10 @@ deinit_game :: proc(game_state: ^Game_State) {
 		thread.destroy(game_state.net_receiver_thread)
 		queue.destroy(&game_state.net_commands_queue)
 		queue.destroy(&game_state.net_response_queue)
-		delete(game_state.net_state.allocator_data)
-		free(game_state.net_state.allocator.data)
+		net_state := &game_state.net_state
+		free_all(net_state.allocator)
+		delete(net_state.allocator_data)
+		free(net_state.allocator.data)
 	}
 	free(game_state)
 }
@@ -1269,16 +1264,7 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		parse_msg(msg, &resp)
 		if game_state.connected {
 			game_state.connected = false
-			game_state.is_room_master = false
-			for i in 0 ..< MAX_PLAYER_COUNT {
-				if game_state.players[i].client_id == "" do continue
-				delete(game_state.players[i].client_id)
-				game_state.players[i].client_id = ""
-			}
-			delete(game_state.room_id)
-			game_state.room_id = ""
-			game_state.room_player_count = 0
-			game_state.room_piece_count = 2
+			reset_net_state(game_state)
 			game_state.screen_state = .MainMenu
 		}
 	case .Quit:
@@ -1299,20 +1285,7 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		resp := Exit_Room_Response{}
 		parse_msg(msg, &resp)
 		if resp.exit {
-			game_state.is_room_master = false
-			game_state.room_player_count = 0
-			game_state.room_ready_player_count = 0
-			game_state.room_piece_count = 2
-
-			for i in 1 ..< MAX_PLAYER_COUNT {
-				if game_state.players[i].client_id == "" do continue
-				delete(game_state.players[i].client_id)
-				game_state.players[i].client_id = ""
-			}
-
-			delete(game_state.room_id)
-			game_state.room_id = ""
-
+			reset_room_state(game_state)
 			if game_state.screen_state == .Room {
 				game_state.screen_state = .MultiplayerGameMode
 			}
@@ -1332,29 +1305,24 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		for i in 0 ..< int(game_state.room_player_count) {
 			if game_state.players[i].client_id == resp.player {
 				if i == 0 {
-					game_state.room_player_count = 0
-					game_state.room_ready_player_count = 0
-					game_state.room_piece_count = 2
-
-					delete(game_state.room_id)
-					game_state.room_id = ""
-
+					reset_room_state(game_state)
 					if game_state.screen_state == .Room {
 						game_state.screen_state = .MultiplayerGameMode
 					}
+				} else {
 					if resp.kicked {
 						game_state.is_trying_to_kick_player_set -= {i}
 					}
-				} else {
 					delete(game_state.players[i].client_id)
 					game_state.players[i].client_id = ""
 					game_state.players[i] = game_state.players[game_state.room_player_count - 1]
+					game_state.players[i].is_ready = false
 					game_state.room_player_count -= 1
 				}
 				break
 			}
 		}
-	case .JoinRoom:
+	case .EnterRoom:
 		resp := Join_Room_Response{}
 		parse_msg(msg, &resp)
 		game_state.is_trying_to_join_room = false
@@ -1398,4 +1366,36 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		}
 		fmt.println("ready count", game_state.room_ready_player_count)
 	}
+}
+
+reset_net_state :: proc(game_state: ^Game_State) {
+	delete(game_state.players[0].client_id)
+	game_state.players[0].client_id = ""
+	game_state.players[0].is_ready = false
+	reset_room_state(game_state)
+}
+
+reset_room_state :: proc(game_state: ^Game_State) {
+	for i in 1 ..< MAX_PLAYER_COUNT {
+		if game_state.players[i].client_id == "" do continue
+		delete(game_state.players[i].client_id)
+		game_state.players[i].client_id = ""
+		game_state.players[i].is_ready = false
+	}
+
+	delete(game_state.room_id)
+	game_state.room_id = ""
+
+	game_state.is_room_master = false
+	game_state.room_player_count = 0
+	game_state.room_ready_player_count = 0
+	game_state.room_piece_count = 2
+	game_state.is_trying_to_connect = false
+	game_state.is_trying_to_kick_player_set = {}
+	game_state.is_trying_to_change_ready_state = false
+	game_state.is_trying_to_create_room = false
+	game_state.is_trying_to_join_room = false
+	game_state.is_trying_to_exit_room = false
+	game_state.is_trying_to_set_piece_count = false
+	game_state.is_trying_to_start_game = false
 }

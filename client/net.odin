@@ -33,7 +33,7 @@ Net_Message_Type :: enum u8 {
 	ExitRoom,
 	SetPieceCount,
 	PlayerLeft,
-	JoinRoom,
+	EnterRoom,
 	PlayerJoined,
 	Ready,
 	KickPlayer,
@@ -290,16 +290,16 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 			msg := send_message(socket, Net_Message{kind = .SetPieceCount, payload = msg_payload})
 		case Join_Room_Request:
 			if socket == 0 do break
-			if err := send_message(socket, Net_Message{kind = .JoinRoom, payload = msg_payload});
+			if err := send_message(socket, Net_Message{kind = .EnterRoom, payload = msg_payload});
 			   err != nil {
-				push_net_response(game_state, compose_net_msg(.JoinRoom, Join_Room_Response{}))
+				push_net_response(game_state, compose_net_msg(.EnterRoom, Join_Room_Response{}))
 				break
 			}
 		case Ready_Request:
 			if socket == 0 do break
 			if err := send_message(socket, Net_Message{kind = .Ready, payload = msg_payload});
 			   err != nil {
-				push_net_response(game_state, compose_net_msg(.JoinRoom, Player_Ready_Response{}))
+				push_net_response(game_state, compose_net_msg(.EnterRoom, Player_Ready_Response{}))
 				break
 			}
 		case Kick_Player_Request:

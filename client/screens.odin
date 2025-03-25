@@ -391,7 +391,8 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 			}
 		}
 
-		if game_state.room_player_count != game_state.room_ready_player_count ||
+		if game_state.room_player_count < 2 ||
+		   game_state.room_player_count != game_state.room_ready_player_count ||
 		   !game_state.is_room_master {
 			rl.GuiDisable()
 		}
