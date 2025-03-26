@@ -32,16 +32,35 @@ type PlayerState struct {
 	IsReady bool
 }
 
+type GameAction uint8
+
+const (
+	GameActionNone GameAction = iota
+	GameActionGameStarted
+	GameActionGameEnded
+	GameActionBeginTurn
+	GameActionEndTurn
+	GameActionCanRoll
+	GameActionBeginRoll
+	GameActionEndRoll
+	GameActionBeginMove
+	GameActionEndMove
+	GameActionSelectingMove
+)
+
 type Room struct {
-	ID         RoomID
-	Master     *Client
-	Players    []PlayerState
-	PieceCount uint8
+	ID            RoomID
+	Master        *Client
+	Players       []PlayerState
+	PieceCount    uint8
+	Action        GameAction
+	PlayerTurnIdx int
 
 	EnterRoomCh     chan *Client
 	ExitRoomCh      chan ExitRoomParams
 	SetPieceCountCh chan SetPieceCountParams
 	PlayerReadyCh   chan PlayerReadyParams
+	StartGameCh     chan *Client
 }
 
 func NewRoom(master *Client) *Room {
@@ -49,45 +68,35 @@ func NewRoom(master *Client) *Room {
 		ID:              RoomID(generateUUID()),
 		Master:          master,
 		PieceCount:      MinPieceCountInRoom,
+		Action:          GameActionNone,
 		EnterRoomCh:     make(chan *Client),
 		ExitRoomCh:      make(chan ExitRoomParams),
 		SetPieceCountCh: make(chan SetPieceCountParams),
 		PlayerReadyCh:   make(chan PlayerReadyParams),
+		StartGameCh:     make(chan *Client),
 	}
 	r.Players = append(r.Players, PlayerState{Client: master})
 	return r
 }
 
 func (r *Room) Enter(client *Client) {
-	if r == nil {
-		log.Println("Room is nil")
-		return
-	}
 	r.EnterRoomCh <- client
 }
 
 func (r *Room) Exit(client ClientID, kicked bool) {
-	if r == nil {
-		log.Println("Room is nil")
-		return
-	}
 	r.ExitRoomCh <- ExitRoomParams{Client: client, Kicked: kicked}
 }
 
 func (r *Room) SetPieceCount(client *Client, pieceCount uint8) {
-	if r == nil {
-		log.Println("Room is nil")
-		return
-	}
 	r.SetPieceCountCh <- SetPieceCountParams{Client: client, PieceCount: pieceCount}
 }
 
 func (r *Room) ReadyPlayer(client *Client, isReady bool) {
-	if r == nil {
-		log.Println("Room is nil")
-		return
-	}
 	r.PlayerReadyCh <- PlayerReadyParams{Client: client, IsReady: isReady}
+}
+
+func (r *Room) StartGame(client *Client) {
+	r.StartGameCh <- client
 }
 
 func (r *Room) ReadLoop(hub *Hub) {
@@ -97,8 +106,7 @@ func (r *Room) ReadLoop(hub *Hub) {
 		case client := <-r.EnterRoomCh:
 			enter(r, client)
 		case msg := <-r.ExitRoomCh:
-			c, kicked := msg.Client, msg.Kicked
-			err := exit(r, c, kicked)
+			err := exit(r, msg.Client, msg.Kicked)
 			if err != nil {
 				log.Println(err)
 			}
@@ -107,16 +115,47 @@ func (r *Room) ReadLoop(hub *Hub) {
 			}
 		case msg := <-r.SetPieceCountCh:
 			if msg.Client != r.Master {
-				msg.Client.Send(SetPieceMessage{ShouldSet: false})
+				msg.Client.Send(SetPieceResponse{ShouldSet: false})
 				break
 			}
 			r.PieceCount = msg.PieceCount
-			err := broadcast(r, SetPieceMessage{ShouldSet: true, PieceCount: msg.PieceCount})
+			err := broadcast(r, SetPieceResponse{ShouldSet: true, PieceCount: msg.PieceCount})
 			if err != nil {
 				log.Println(err)
 			}
 		case msg := <-r.PlayerReadyCh:
+			isInRoom := false
+			for idx, p := range r.Players {
+				if p.Client == msg.Client {
+					r.Players[idx].IsReady = msg.IsReady
+					isInRoom = true
+					break
+				}
+			}
+			if !isInRoom {
+				msg.Client.Send(PlayerReadyResponse{})
+				break
+			}
 			err := broadcast(r, PlayerReadyResponse{Player: msg.Client.ID, IsReady: msg.IsReady})
+			if err != nil {
+				log.Println(err)
+			}
+		case client := <-r.StartGameCh:
+			readyCount := 0
+			for _, p := range r.Players {
+				if p.IsReady {
+					readyCount++
+				}
+			}
+			if r.Master != client || readyCount != len(r.Players) {
+				client.Send(StartGameResponse{})
+				break
+			}
+			r.PlayerTurnIdx = rand.Intn(len(r.Players))
+			err := broadcast(r, StartGameResponse{
+				ShouldStart:    true,
+				StartingPlayer: r.Players[r.PlayerTurnIdx].Client.ID,
+			})
 			if err != nil {
 				log.Println(err)
 			}
@@ -157,7 +196,7 @@ func enter(r *Room, client *Client) {
 	})
 	broadcast(r, PlayerJoinedResponse{ClientID: client.ID})
 	r.Players = append(r.Players, PlayerState{Client: client})
-	client.SetRoom(r)
+	client.EnterRoom(r)
 }
 
 func exit(r *Room, clientID ClientID, kicked bool) error {
@@ -166,11 +205,21 @@ func exit(r *Room, clientID ClientID, kicked bool) error {
 		return nil
 	}
 
+	isInRoom := false
+
 	for idx, p := range r.Players {
 		if p.Client.ID == clientID {
+			isInRoom = true
+			if kicked {
+				p.Client.ExitRoom()
+			}
 			r.Players[idx], r.Players[clientCount-1] = r.Players[clientCount-1], r.Players[idx]
 			break
 		}
+	}
+
+	if !isInRoom {
+		return nil
 	}
 
 	masterID := ClientID("")
@@ -181,11 +230,21 @@ func exit(r *Room, clientID ClientID, kicked bool) error {
 		masterID = r.Master.ID
 	}
 
-	err := broadcast(r, PlayerLeftMessage{Master: masterID, Player: clientID, Kicked: kicked})
+	err := broadcast(r, PlayerLeftResponse{Master: masterID, Player: clientID, Kicked: kicked})
 	if err != nil {
 		return err
 	}
 
 	r.Players = r.Players[:clientCount-1]
+	if r.Action != GameActionNone {
+		reset(r)
+	}
 	return nil
+}
+
+func reset(r *Room) {
+	r.Action = GameActionNone
+	for idx := range r.Players {
+		r.Players[idx].IsReady = false
+	}
 }

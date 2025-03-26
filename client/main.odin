@@ -62,7 +62,7 @@ Draw_State :: struct {
 }
 
 Action :: enum {
-	InRoom,
+	None,
 	GameStarted,
 	GameEnded,
 	BeginTurn,
@@ -73,6 +73,11 @@ Action :: enum {
 	BeginMove,
 	EndMove,
 	SelectingMove,
+}
+
+Game_Mode :: enum {
+	Local,
+	Online,
 }
 
 Game_State :: struct {
@@ -96,6 +101,7 @@ Game_State :: struct {
 	move_seq_idx:                    i32,
 	use_debug_roll:                  bool,
 	debug_roll:                      i32,
+	game_mode:                       Game_Mode,
 	net_sender_thread:               ^thread.Thread,
 	net_receiver_thread:             ^thread.Thread,
 	net_commands_queue:              queue.Queue(Net_Request),
@@ -183,14 +189,16 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	resize(&game_state.rolls, 0)
 	game_state.is_paused = false
 	game_state.selected_piece_index = -1
-	game_state.current_action = .InRoom
+	game_state.current_action = .None
 	game_state.should_roll = false
 	game_state.use_debug_roll = true
 	game_state.debug_roll = 1
 }
 
 start_game :: proc(game_state: ^Game_State) {
-	if game_state.current_action == .InRoom {
+	if game_state.game_mode == .Online {
+		net_start_game(game_state)
+	} else {
 		game_state.player_turn_index = rand.int31_max(game_state.player_count)
 		game_state.current_action = .GameStarted
 	}
@@ -627,11 +635,12 @@ main :: proc() {
 			if !game_state.is_trying_to_connect {
 				game_state.connection_timer += dt
 				if game_state.connection_timer >= 0.5 {
-					connect(game_state)
+					net_connect(game_state)
 					game_state.connection_timer = 0.0
 				}
 			}
 			if game_state.connected {
+				game_state.game_mode = .Online
 				game_state.screen_state = .MultiplayerGameMode
 			} else {
 				draw_connecting_screen(game_state, default_style)
@@ -652,9 +661,7 @@ main :: proc() {
 			piece_size := draw_state.piece_size
 
 			switch game_state.current_action {
-			case .InRoom:
-				fmt.println("ready")
-				start_game(game_state)
+			case .None:
 			case .GameStarted:
 				fmt.println("game has started")
 				begin_turn(game_state)
@@ -761,6 +768,7 @@ main :: proc() {
 				{
 					w := get_widget(layout, main_menu_id)
 					if rl.GuiButton(w.rect, w.text) {
+						push_net_request(game_state, Exit_Room_Request{})
 						reset_game_state(game_state)
 						game_state.screen_state = .MainMenu
 					}
@@ -1264,6 +1272,7 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		parse_msg(msg, &resp)
 		if game_state.connected {
 			game_state.connected = false
+			game_state.game_mode = .Local
 			reset_net_state(game_state)
 			game_state.screen_state = .MainMenu
 		}
@@ -1310,6 +1319,10 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 						game_state.screen_state = .MultiplayerGameMode
 					}
 				} else {
+					if game_state.screen_state == .GamePlay {
+						game_state.screen_state = .Room
+						reset_game_state(game_state)
+					}
 					if resp.kicked {
 						game_state.is_trying_to_kick_player_set -= {i}
 					}
@@ -1365,6 +1378,22 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 			game_state.room_ready_player_count -= 1
 		}
 		fmt.println("ready count", game_state.room_ready_player_count)
+	case .StartGame:
+		game_state.is_trying_to_start_game = false
+		resp := Start_Game_Response{}
+		parse_msg(msg, &resp)
+		fmt.println(resp)
+		if resp.should_start {
+			game_state.player_count = game_state.room_player_count
+			for i in 0 ..< game_state.player_count {
+				if game_state.players[i].client_id == resp.starting_player {
+					game_state.player_turn_index = i
+					break
+				}
+			}
+			game_state.screen_state = .GamePlay
+			game_state.current_action = .GameStarted
+		}
 	}
 }
 

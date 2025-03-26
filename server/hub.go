@@ -36,20 +36,20 @@ func (h *Hub) HandleClients() {
 				return
 			}
 			client := NewClient(conn)
-			if err := client.Send(ConnectMessage{ClientID: client.ID}); err != nil {
+			if err := client.Send(ConnectResponse{ClientID: client.ID}); err != nil {
 				break
 			}
 			go client.ReadLoop(h)
 			go client.WriteLoop(h)
 		case client := <-h.CreateRoomCh:
 			room := NewRoom(client)
-			err := client.Send(CreateRoomMessage{RoomID: room.ID})
+			err := client.Send(CreateRoomResponse{RoomID: room.ID})
 			if err != nil {
 				log.Println(err)
 				break
 			}
 			h.Rooms[room.ID] = room
-			client.SetRoom(room)
+			client.EnterRoom(room)
 			go room.ReadLoop(h)
 			log.Printf("hub created room '%s'\n", room.ID)
 		case params := <-h.EnterRoomCh:

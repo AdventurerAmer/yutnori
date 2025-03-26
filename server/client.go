@@ -14,25 +14,38 @@ type Client struct {
 	ID     ClientID
 	SendCh chan []byte
 
+	EnterRoomCh chan *Room
+	ExitRoomCh  chan struct{}
+
 	roomMu sync.RWMutex
-	room   *Room
+	room   *Room // don't read or write this outside of the client's read/write loop
 }
 
 func NewClient(conn net.Conn) *Client {
 	return &Client{
-		Conn:   conn,
-		ID:     ClientID(generateUUID()),
-		SendCh: make(chan []byte, 128),
+		Conn:        conn,
+		ID:          ClientID(generateUUID()),
+		SendCh:      make(chan []byte, 128),
+		EnterRoomCh: make(chan *Room),
+		ExitRoomCh:  make(chan struct{}),
 	}
 }
 
-func (c *Client) SetRoom(room *Room) {
+func (c *Client) EnterRoom(room *Room) {
+	c.EnterRoomCh <- room
+}
+
+func (c *Client) ExitRoom() {
+	c.ExitRoomCh <- struct{}{}
+}
+
+func setRoom(c *Client, room *Room) {
 	c.roomMu.Lock()
 	defer c.roomMu.Unlock()
 	c.room = room
 }
 
-func (c *Client) GetRoom() *Room {
+func getRoom(c *Client) *Room {
 	c.roomMu.RLock()
 	defer c.roomMu.RUnlock()
 	return c.room
@@ -54,8 +67,10 @@ func (c *Client) SendBytes(msg []byte) {
 func (c *Client) ReadLoop(hub *Hub) {
 	defer func() {
 		c.Conn.Close()
-		room := c.GetRoom()
-		room.Exit(c.ID, false)
+		room := getRoom(c)
+		if room != nil {
+			room.Exit(c.ID, false)
+		}
 	}()
 
 	for {
@@ -71,8 +86,10 @@ func (c *Client) ReadLoop(hub *Hub) {
 func (c *Client) WriteLoop(hub *Hub) {
 	defer func() {
 		c.Conn.Close()
-		room := c.GetRoom()
-		room.Exit(c.ID, false)
+		room := getRoom(c)
+		if room != nil {
+			room.Exit(c.ID, false)
+		}
 	}()
 	for {
 		select {
@@ -85,6 +102,10 @@ func (c *Client) WriteLoop(hub *Hub) {
 				log.Println(err)
 				return
 			}
+		case room := <-c.EnterRoomCh:
+			setRoom(c, room)
+		case <-c.ExitRoomCh:
+			setRoom(c, nil)
 		}
 	}
 }
@@ -94,7 +115,10 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 	case MessageTypeCreateRoom:
 		hub.CreateRoom(c)
 	case MessageTypeExitRoom:
-		room := c.GetRoom()
+		room := getRoom(c)
+		if room == nil {
+			break
+		}
 		room.Exit(c.ID, false)
 	case MessageTypeSetPieceCount:
 		req := struct {
@@ -112,7 +136,11 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 		if pieceCount < MinPieceCountInRoom {
 			pieceCount = MinPieceCountInRoom
 		}
-		room := c.GetRoom()
+		room := getRoom(c)
+		if room == nil {
+			c.Send(SetPieceResponse{})
+			break
+		}
 		room.SetPieceCount(c, pieceCount)
 	case MessageTypeEnterRoom:
 		req := struct {
@@ -133,7 +161,11 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 			log.Println(err)
 			return
 		}
-		room := c.GetRoom()
+		room := getRoom(c)
+		if room == nil {
+			c.Send(PlayerReadyResponse{})
+			break
+		}
 		room.ReadyPlayer(c, req.IsReady)
 	case MessageTypeKickPlayer:
 		req := struct {
@@ -144,9 +176,19 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 			log.Println(err)
 			return
 		}
-		log.Println("Kicking Player", req.Player)
-		room := c.GetRoom()
+		room := getRoom(c)
+		if room == nil {
+			c.Send(PlayerJoinedResponse{})
+			break
+		}
 		room.Exit(req.Player, true)
+	case MessageTypeStartGame:
+		room := getRoom(c)
+		if room == nil {
+			c.Send(StartGameResponse{})
+			break
+		}
+		room.StartGame(c)
 	}
 }
 

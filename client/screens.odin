@@ -70,6 +70,7 @@ draw_game_modes_menu :: proc(game_state: ^Game_State, style: UI_Style) {
 	{
 		w := get_widget(layout, local_id)
 		if rl.GuiButton(w.rect, w.text) {
+			game_state.game_mode = .Local
 			game_state.screen_state = .LocalGameMode
 		}
 	}
@@ -77,9 +78,7 @@ draw_game_modes_menu :: proc(game_state: ^Game_State, style: UI_Style) {
 	{
 		w := get_widget(layout, online_id)
 		if rl.GuiButton(w.rect, w.text) {
-			if !game_state.connected {
-				connect(game_state)
-			}
+			net_connect(game_state)
 			game_state.screen_state = .Connecting
 		}
 	}
@@ -195,6 +194,7 @@ draw_local_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style) {
 	{
 		w := get_widget(layout, start_id)
 		if rl.GuiButton(w.rect, w.text) {
+			start_game(game_state)
 			game_state.screen_state = .GamePlay
 		}
 	}
@@ -238,7 +238,7 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 		}
 		w := get_widget(layout, create_room_id)
 		if rl.GuiButton(w.rect, w.text) {
-			create_room(game_state)
+			net_create_room(game_state)
 		}
 		rl.GuiEnable()
 	}
@@ -266,7 +266,7 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 		if rl.GuiButton(w.rect, w.text) {
 			c_text := cast(cstring)&text_buffer[0]
 			room_id := strings.clone_from_cstring(c_text, context.temp_allocator)
-			join_room(game_state, room_id)
+			net_join_room(game_state, room_id)
 		}
 
 		rl.GuiEnable()
@@ -275,7 +275,7 @@ draw_multiplayer_game_mode_menu :: proc(game_state: ^Game_State, style: UI_Style
 	{
 		w := get_widget(layout, back_id)
 		if rl.GuiButton(w.rect, w.text) {
-			disconnect(game_state)
+			net_disconnect(game_state)
 			reset_game_state(game_state)
 			game_state.screen_state = .GameModes
 		}
@@ -387,11 +387,12 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 			)
 			if prev_piece_count != game_state.room_piece_count {
 				game_state.piece_count = prev_piece_count
-				set_piece_count(game_state, game_state.room_piece_count)
+				net_set_piece_count(game_state, game_state.room_piece_count)
 			}
 		}
 
-		if game_state.room_player_count < 2 ||
+		if game_state.is_trying_to_start_game ||
+		   game_state.room_player_count < 2 ||
 		   game_state.room_player_count != game_state.room_ready_player_count ||
 		   !game_state.is_room_master {
 			rl.GuiDisable()
@@ -424,7 +425,7 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 			}
 			w := get_widget(layout, ui_state.kick)
 			if rl.GuiButton(w.rect, w.text) {
-				kick_player(game_state, player_idx)
+				net_kick_player(game_state, player_idx)
 			}
 			rl.GuiEnable()
 		}
@@ -437,7 +438,7 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 
 		w := get_widget(layout, ready_unready_id)
 		if rl.GuiButton(w.rect, w.text) {
-			change_ready_state(game_state, !game_state.players[0].is_ready)
+			net_change_ready_state(game_state, !game_state.players[0].is_ready)
 		}
 
 		rl.GuiEnable()
@@ -450,7 +451,7 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 		w := get_widget(layout, back_id)
 		if rl.GuiButton(w.rect, w.text) {
 			reset_game_state(game_state)
-			exit_room(game_state)
+			net_exit_room(game_state)
 		}
 		rl.GuiEnable()
 	}

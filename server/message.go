@@ -23,6 +23,7 @@ const (
 	MessageTypePlayerJoined
 	MessageTypePlayerReady
 	MessageTypeKickPlayer
+	MessageTypeStartGame
 )
 
 type Message struct {
@@ -34,38 +35,38 @@ type MessageSerializer interface {
 	Kind() MessageType
 }
 
-type ConnectMessage struct {
+type ConnectResponse struct {
 	ClientID ClientID `json:"client_id"`
 }
 
-func (c ConnectMessage) Kind() MessageType {
+func (c ConnectResponse) Kind() MessageType {
 	return MessageTypeConnect
 }
 
-type CreateRoomMessage struct {
+type CreateRoomResponse struct {
 	RoomID RoomID `json:"room_id"`
 }
 
-func (c CreateRoomMessage) Kind() MessageType {
+func (c CreateRoomResponse) Kind() MessageType {
 	return MessageTypeCreateRoom
 }
 
-type SetPieceMessage struct {
+type SetPieceResponse struct {
 	PieceCount uint8 `json:"piece_count"`
 	ShouldSet  bool  `json:"should_set"`
 }
 
-func (c SetPieceMessage) Kind() MessageType {
+func (c SetPieceResponse) Kind() MessageType {
 	return MessageTypeSetPieceCount
 }
 
-type PlayerLeftMessage struct {
+type PlayerLeftResponse struct {
 	Player ClientID `json:"player"`
 	Master ClientID `json:"master"`
 	Kicked bool     `json:"kicked"`
 }
 
-func (c PlayerLeftMessage) Kind() MessageType {
+func (c PlayerLeftResponse) Kind() MessageType {
 	return MessageTypePlayerLeft
 }
 
@@ -101,6 +102,15 @@ type PlayerReadyResponse struct {
 
 func (p PlayerReadyResponse) Kind() MessageType {
 	return MessageTypePlayerReady
+}
+
+type StartGameResponse struct {
+	ShouldStart    bool     `json:"should_start"`
+	StartingPlayer ClientID `json:"starting_player"`
+}
+
+func (s StartGameResponse) Kind() MessageType {
+	return MessageTypeStartGame
 }
 
 func ReadMessage(conn net.Conn) (Message, error) {
