@@ -27,9 +27,50 @@ type PlayerReadyParams struct {
 	IsReady bool
 }
 
+type CellID uint8
+
+const (
+	BottomRightCorner CellID = iota
+	Right0
+	Right1
+	Right2
+	Right3
+	TopRightCorner
+	Top0
+	Top1
+	Top2
+	Top3
+	TopLeftCorner
+	Left0
+	Left1
+	Left2
+	Left3
+	BottomLeftCorner
+	Bottom0
+	Bottom1
+	Bottom2
+	Bottom3
+	MainDiagonal0
+	MainDiagonal1
+	MainDiagonal2
+	MainDiagonal3
+	AntiDiagonal0
+	AntiDiagonal1
+	AntiDiagonal2
+	AntiDiagonal3
+	Center
+)
+
+type Piece struct {
+	IsAtStart  bool
+	IsFinished bool
+	Cell       CellID
+}
+
 type PlayerState struct {
 	Client  *Client
 	IsReady bool
+	Pieces  [MaxPieceCountInRoom]Piece
 }
 
 type GameAction uint8
@@ -55,12 +96,14 @@ type Room struct {
 	PieceCount    uint8
 	Action        GameAction
 	PlayerTurnIdx int
+	Rolls         []int
 
 	EnterRoomCh     chan *Client
 	ExitRoomCh      chan ExitRoomParams
 	SetPieceCountCh chan SetPieceCountParams
 	PlayerReadyCh   chan PlayerReadyParams
 	StartGameCh     chan *Client
+	BeginRollCh     chan *Client
 }
 
 func NewRoom(master *Client) *Room {
@@ -74,6 +117,7 @@ func NewRoom(master *Client) *Room {
 		SetPieceCountCh: make(chan SetPieceCountParams),
 		PlayerReadyCh:   make(chan PlayerReadyParams),
 		StartGameCh:     make(chan *Client),
+		BeginRollCh:     make(chan *Client),
 	}
 	r.Players = append(r.Players, PlayerState{Client: master})
 	return r
@@ -97,6 +141,10 @@ func (r *Room) ReadyPlayer(client *Client, isReady bool) {
 
 func (r *Room) StartGame(client *Client) {
 	r.StartGameCh <- client
+}
+
+func (r *Room) Roll(client *Client) {
+	r.BeginRollCh <- client
 }
 
 func (r *Room) ReadLoop(hub *Hub) {
@@ -141,6 +189,10 @@ func (r *Room) ReadLoop(hub *Hub) {
 				log.Println(err)
 			}
 		case client := <-r.StartGameCh:
+			if r.Action != GameActionNone {
+				log.Printf("illegal move action should be %d got %d\n", GameActionNone, r.Action)
+				break
+			}
 			readyCount := 0
 			for _, p := range r.Players {
 				if p.IsReady {
@@ -159,8 +211,73 @@ func (r *Room) ReadLoop(hub *Hub) {
 			if err != nil {
 				log.Println(err)
 			}
+			err = broadcast(r, BeginTurnResponse{})
+			if err != nil {
+				log.Println(err)
+			}
+			r.Players[r.PlayerTurnIdx].Client.Send(CallRollResponse{})
+			r.Action = GameActionCanRoll
+		case client := <-r.BeginRollCh:
+			if r.Action != GameActionCanRoll {
+				log.Printf("illegal move action should be %d got %d\n", GameActionCanRoll, r.Action)
+				break
+			}
+			player := &r.Players[r.PlayerTurnIdx]
+			if player.Client != client {
+				log.Printf("permission denied action should be from client '%s' but got '%s'\n", player.Client.ID, client.ID)
+				break
+			}
+			n, shouldAppend := roll(r)
+			err := broadcast(r, EndRollResponse{ShouldAppend: shouldAppend, Roll: n})
+			if err != nil {
+				log.Println(err)
+			}
+			if n == 4 || n == 5 {
+				client.Send(CallRollResponse{})
+				r.Action = GameActionCanRoll
+			} else if len(r.Rolls) == 0 {
+				r.PlayerTurnIdx += 1
+				r.PlayerTurnIdx %= len(r.Players)
+				err := broadcast(r, EndTurnResponse{NextPlayer: r.Players[r.PlayerTurnIdx].Client.ID})
+				if err != nil {
+					log.Println(err)
+				}
+				err = broadcast(r, BeginTurnResponse{})
+				if err != nil {
+					log.Println(err)
+				}
+				r.Players[r.PlayerTurnIdx].Client.Send(CallRollResponse{})
+				r.Action = GameActionCanRoll
+			} else {
+				broadcast(r, SelectingMoveResponse{})
+				r.Action = GameActionSelectingMove
+			}
 		}
 	}
+}
+
+func roll(r *Room) (int, bool) {
+	n := rand.Intn(7) - 1
+	shouldAppend := true
+	if n == 0 {
+		shouldAppend = false
+		r.Rolls = r.Rolls[:0]
+	}
+	player := r.Players[r.PlayerTurnIdx]
+	IsAllPiecesAtStart := true
+	for _, piece := range player.Pieces {
+		if !piece.IsAtStart {
+			IsAllPiecesAtStart = false
+			break
+		}
+	}
+	if n == -1 && IsAllPiecesAtStart && len(r.Rolls) == 0 {
+		shouldAppend = false
+	}
+	if shouldAppend {
+		r.Rolls = append(r.Rolls, n)
+	}
+	return n, shouldAppend
 }
 
 func broadcast(r *Room, serializer MessageSerializer) error {

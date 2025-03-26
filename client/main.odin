@@ -93,14 +93,11 @@ Game_State :: struct {
 	rolls:                           [dynamic]i32,
 	selected_piece_index:            i32,
 	current_action:                  Action,
-	should_roll:                     bool,
 	target_move:                     Move,
 	target_piece:                    i32,
 	target_position:                 Vec2,
 	target_position_percent:         f32,
 	move_seq_idx:                    i32,
-	use_debug_roll:                  bool,
-	debug_roll:                      i32,
 	game_mode:                       Game_Mode,
 	net_sender_thread:               ^thread.Thread,
 	net_receiver_thread:             ^thread.Thread,
@@ -124,6 +121,7 @@ Game_State :: struct {
 	is_trying_to_change_ready_state: bool,
 	is_trying_to_kick_player_set:    bit_set[0 ..< MAX_PLAYER_COUNT;int],
 	is_trying_to_start_game:         bool,
+	is_trying_to_roll:               bool,
 	net_state:                       Net_State,
 }
 
@@ -177,6 +175,7 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	for i in 0 ..< MAX_PLAYER_COUNT {
 		p := &game_state.players[i]
 		p.color = PLAYER_COLORS[i]
+		p.is_ready = false
 		for j in 0 ..< MAX_PIECE_COUNT {
 			piece := Piece {
 				at_start = true,
@@ -190,9 +189,6 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	game_state.is_paused = false
 	game_state.selected_piece_index = -1
 	game_state.current_action = .None
-	game_state.should_roll = false
-	game_state.use_debug_roll = true
-	game_state.debug_roll = 1
 }
 
 start_game :: proc(game_state: ^Game_State) {
@@ -212,12 +208,14 @@ end_game :: proc(game_state: ^Game_State) {
 }
 
 begin_turn :: proc(game_state: ^Game_State) {
+	if game_state.game_mode == .Online do return
 	if game_state.current_action == .GameStarted || game_state.current_action == .EndTurn {
 		game_state.current_action = .BeginTurn
 	}
 }
 
 end_turn :: proc(game_state: ^Game_State) {
+	if game_state.game_mode == .Online do return
 	current_player := game_state.players[game_state.player_turn_index]
 
 	finished_piece_count := i32(0)
@@ -238,9 +236,6 @@ end_turn :: proc(game_state: ^Game_State) {
 
 roll :: proc(game_state: ^Game_State) -> i32 {
 	n := rand.int31_max(7) - 1
-	if game_state.use_debug_roll {
-		n = game_state.debug_roll
-	}
 	should_append := true
 	if n == 0 {
 		should_append = false
@@ -264,14 +259,20 @@ roll :: proc(game_state: ^Game_State) -> i32 {
 }
 
 can_roll :: proc(game_state: ^Game_State) {
+	if game_state.game_mode == .Online do return
 	game_state.current_action = .CanRoll
 }
 
 begin_roll :: proc(game_state: ^Game_State) {
+	if game_state.game_mode == .Online {
+		net_roll(game_state)
+		return
+	}
 	game_state.current_action = .BeginRoll
 }
 
 end_roll :: proc(game_state: ^Game_State) {
+	if game_state.game_mode == .Online do return
 	n := roll(game_state)
 	fmt.printf("roll: %d\n", n)
 	game_state.current_action = .EndRoll
@@ -577,45 +578,6 @@ main :: proc() {
 			close_game(game_state)
 		}
 
-		if rl.IsKeyPressed(.R) {
-			game_state.use_debug_roll = !game_state.use_debug_roll
-		}
-
-		if game_state.use_debug_roll {
-			if rl.IsKeyPressed(.GRAVE) {
-				game_state.debug_roll = -1
-			}
-			if rl.IsKeyPressed(.ZERO) {
-				game_state.debug_roll = 0
-			}
-			if rl.IsKeyPressed(.ONE) {
-				game_state.debug_roll = 1
-			}
-			if rl.IsKeyPressed(.TWO) {
-				game_state.debug_roll = 2
-			}
-			if rl.IsKeyPressed(.THREE) {
-				game_state.debug_roll = 3
-			}
-			if rl.IsKeyPressed(.FOUR) {
-				game_state.debug_roll = 4
-			}
-			if rl.IsKeyPressed(.FIVE) {
-				game_state.debug_roll = 5
-			}
-
-			if game_state.screen_state == .GamePlay {
-				rl.DrawTextEx(
-					default_style.font,
-					fmt.ctprintf("NEXT ROLL: %d", game_state.debug_roll),
-					{5, 5},
-					default_style.font_size * 0.75,
-					default_style.font_spacing,
-					rl.DARKGREEN,
-				)
-			}
-		}
-
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.SKYBLUE)
 
@@ -668,30 +630,24 @@ main :: proc() {
 			case .GameEnded:
 				fmt.printf("game has ended P%d won\n", game_state.player_won_index + 1)
 			case .BeginTurn:
-				fmt.println("begin turn")
 				can_roll(game_state)
 			case .EndTurn:
-				fmt.println("end turn")
 				end_turn(game_state)
 			case .CanRoll:
-				fmt.println("can roll")
-				if game_state.should_roll {
-					game_state.should_roll = false
-					begin_roll(game_state)
-				}
 			case .BeginRoll:
-				fmt.println("begin roll")
 				end_roll(game_state)
 			case .EndRoll:
-				fmt.println("end roll")
-				roll_count := len(game_state.rolls)
-				if roll_count == 0 {
-					game_state.current_action = .EndTurn
-				} else if game_state.rolls[len(game_state.rolls) - 1] == 4 ||
-				   game_state.rolls[len(game_state.rolls) - 1] == 5 {
-					game_state.current_action = .CanRoll
-				} else {
-					game_state.current_action = .SelectingMove
+				if game_state.game_mode == .Local {
+					fmt.println("end roll")
+					roll_count := len(game_state.rolls)
+					if roll_count == 0 {
+						game_state.current_action = .EndTurn
+					} else if game_state.rolls[len(game_state.rolls) - 1] == 4 ||
+					   game_state.rolls[len(game_state.rolls) - 1] == 5 {
+						game_state.current_action = .CanRoll
+					} else {
+						game_state.current_action = .SelectingMove
+					}
 				}
 			case .BeginMove:
 				fmt.println("begin move")
@@ -947,12 +903,14 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 			cursor.y += screen_size.y * 0.01
 			r := Rect{screen_size.x * 0.5 - size.x * 0.5, cursor.y, size.x, size.y}
 
-			if game_state.current_action != .CanRoll || game_state.is_paused {
+			if game_state.current_action != .CanRoll ||
+			   game_state.is_paused ||
+			   game_state.is_trying_to_roll {
 				rl.GuiDisable()
 			}
 
 			if rl.GuiButton(r, text) {
-				game_state.should_roll = true
+				begin_roll(game_state)
 			}
 
 			rl.GuiEnable()
@@ -1319,10 +1277,6 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 						game_state.screen_state = .MultiplayerGameMode
 					}
 				} else {
-					if game_state.screen_state == .GamePlay {
-						game_state.screen_state = .Room
-						reset_game_state(game_state)
-					}
 					if resp.kicked {
 						game_state.is_trying_to_kick_player_set -= {i}
 					}
@@ -1331,6 +1285,11 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 					game_state.players[i] = game_state.players[game_state.room_player_count - 1]
 					game_state.players[i].is_ready = false
 					game_state.room_player_count -= 1
+
+					if game_state.screen_state == .GamePlay {
+						reset_game_state(game_state)
+						game_state.screen_state = .Room
+					}
 				}
 				break
 			}
@@ -1377,12 +1336,10 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		} else {
 			game_state.room_ready_player_count -= 1
 		}
-		fmt.println("ready count", game_state.room_ready_player_count)
 	case .StartGame:
 		game_state.is_trying_to_start_game = false
 		resp := Start_Game_Response{}
 		parse_msg(msg, &resp)
-		fmt.println(resp)
 		if resp.should_start {
 			game_state.player_count = game_state.room_player_count
 			for i in 0 ..< game_state.player_count {
@@ -1394,6 +1351,38 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 			game_state.screen_state = .GamePlay
 			game_state.current_action = .GameStarted
 		}
+	case .BeginTurn:
+		fmt.println("begin turn")
+		game_state.current_action = .BeginTurn
+	case .CanRoll:
+		fmt.println("can roll")
+		game_state.current_action = .CanRoll
+	case .BeginRoll:
+	case .EndRoll:
+		game_state.is_trying_to_roll = false
+		resp := End_Roll_Response{}
+		parse_msg(msg, &resp)
+		fmt.printf("end roll %d\n", resp.roll)
+		if resp.should_append {
+			append(&game_state.rolls, i32(resp.roll))
+		}
+	case .EndTurn:
+		fmt.println("end turn")
+		resp := End_Turn_Response{}
+		parse_msg(msg, &resp)
+		for idx in 0 ..< game_state.player_count {
+			if game_state.players[idx].client_id == resp.next_player {
+				game_state.player_turn_index = idx
+				break
+			}
+		}
+		resize(&game_state.rolls, 0)
+		game_state.current_action = .EndTurn
+	case .SelectingMove:
+		fmt.println("selecting move")
+		resp := Selecting_Move_Response{}
+		parse_msg(msg, &resp)
+		game_state.current_action = .SelectingMove
 	}
 }
 
@@ -1427,4 +1416,5 @@ reset_room_state :: proc(game_state: ^Game_State) {
 	game_state.is_trying_to_exit_room = false
 	game_state.is_trying_to_set_piece_count = false
 	game_state.is_trying_to_start_game = false
+	game_state.is_trying_to_roll = false
 }

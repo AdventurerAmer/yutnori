@@ -24,6 +24,12 @@ const (
 	MessageTypePlayerReady
 	MessageTypeKickPlayer
 	MessageTypeStartGame
+	MessageTypeBeginTurn
+	MessageTypeCanRoll
+	MessageTypeBeginRoll
+	MessageTypeEndRoll
+	MessageTypeEndTurn
+	MessageTypeSelectingMove
 )
 
 type Message struct {
@@ -111,6 +117,41 @@ type StartGameResponse struct {
 
 func (s StartGameResponse) Kind() MessageType {
 	return MessageTypeStartGame
+}
+
+type BeginTurnResponse struct{}
+
+func (b BeginTurnResponse) Kind() MessageType {
+	return MessageTypeBeginTurn
+}
+
+type CallRollResponse struct{}
+
+func (c CallRollResponse) Kind() MessageType {
+	return MessageTypeCanRoll
+}
+
+type EndRollResponse struct {
+	ShouldAppend bool `json:"should_append"`
+	Roll         int  `json:"roll"`
+}
+
+func (e EndRollResponse) Kind() MessageType {
+	return MessageTypeEndRoll
+}
+
+type EndTurnResponse struct {
+	NextPlayer ClientID `json:"next_player"`
+}
+
+func (e EndTurnResponse) Kind() MessageType {
+	return MessageTypeEndTurn
+}
+
+type SelectingMoveResponse struct{}
+
+func (s SelectingMoveResponse) Kind() MessageType {
+	return MessageTypeSelectingMove
 }
 
 func ReadMessage(conn net.Conn) (Message, error) {

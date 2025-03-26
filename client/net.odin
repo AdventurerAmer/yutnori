@@ -38,6 +38,12 @@ Net_Message_Type :: enum u8 {
 	Ready,
 	KickPlayer,
 	StartGame,
+	BeginTurn,
+	CanRoll,
+	BeginRoll,
+	EndRoll,
+	EndTurn,
+	SelectingMove,
 }
 
 Net_Message :: struct {
@@ -65,6 +71,7 @@ Ready_Request :: struct {
 	is_ready: bool `json:"is_ready"`,
 }
 Start_Game_Request :: struct {}
+Begin_Roll_Request :: struct {}
 Net_Request :: union {
 	Connect_Request,
 	Disconnect_Request,
@@ -76,6 +83,7 @@ Net_Request :: union {
 	Ready_Request,
 	Kick_Player_Request,
 	Start_Game_Request,
+	Begin_Roll_Request,
 }
 
 Connect_Response :: struct {
@@ -83,25 +91,31 @@ Connect_Response :: struct {
 }
 
 Disconnect_Response :: struct {}
+
 Create_Room_Response :: struct {
 	room_id: string `json:"room_id"`,
 }
+
 Exit_Room_Response :: struct {
 	exit: bool,
 }
+
 Set_Piece_Count_Response :: struct {
 	should_set:  bool `json:"should_set"`,
 	piece_count: i32 `json:"piece_count"`,
 }
+
 Player_Left_Response :: struct {
 	player: string `json:"player"`,
 	master: string `json:"master"`,
 	kicked: bool `json:"kicked"`,
 }
+
 Player_Room_State :: struct {
 	client_id: string `json:"client_id"`,
 	is_ready:  bool `json:"is_ready"`,
 }
+
 Join_Room_Response :: struct {
 	room_id:     string `json:"room_id"`,
 	join:        bool `json:"join"`,
@@ -109,6 +123,7 @@ Join_Room_Response :: struct {
 	piece_count: u8 `json:"piece_count"`,
 	players:     []Player_Room_State `json:"players"`,
 }
+
 Player_Joined_Response :: struct {
 	client_id: string `json:"client_id"`,
 }
@@ -126,6 +141,17 @@ Start_Game_Response :: struct {
 	should_start:    bool `json:"shout_start"`,
 	starting_player: string `json:"starting_player"`,
 }
+
+Begin_Turn_Response :: struct {}
+End_Roll_Response :: struct {
+	should_append: bool `json:"should_append"`,
+	roll:          int `json:"roll"`,
+}
+End_Turn_Response :: struct {
+	next_player: string `json:"next_player"`,
+}
+
+Selecting_Move_Response :: struct {}
 
 send_message :: proc(
 	socket: net.TCP_Socket,
@@ -324,6 +350,12 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 				break
 			}
 			fmt.println("sending start game")
+		case Begin_Roll_Request:
+			if socket == 0 do break
+			err := send_message(socket, Net_Message{kind = .BeginRoll, payload = msg_payload})
+			if err != nil {
+				fmt.println(err)
+			}
 		}
 	}
 	fmt.println("sender finished")
@@ -494,4 +526,13 @@ net_start_game :: proc(game_state: ^Game_State) {
 	}
 	game_state.is_trying_to_start_game = true
 	push_net_request(game_state, Start_Game_Request{})
+}
+
+net_roll :: proc(game_state: ^Game_State) {
+	if !game_state.connected || game_state.room_id == "" || game_state.current_action != .CanRoll {
+		return
+	}
+	game_state.is_trying_to_roll = true
+	push_net_request(game_state, Begin_Roll_Request{})
+	game_state.current_action = .BeginRoll
 }

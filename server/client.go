@@ -189,6 +189,12 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 			break
 		}
 		room.StartGame(c)
+	case MessageTypeBeginRoll:
+		room := getRoom(c)
+		if room == nil {
+			break
+		}
+		room.Roll(c)
 	}
 }
 
