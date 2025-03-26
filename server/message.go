@@ -69,17 +69,17 @@ func (c PlayerLeftMessage) Kind() MessageType {
 	return MessageTypePlayerLeft
 }
 
-type PlayerRoomState struct {
+type PlayerRoomStateRespone struct {
 	ClientID ClientID `json:"client_id"`
 	IsReady  bool     `json:"is_ready"`
 }
 
 type JoinRoomResponse struct {
-	RoomID     RoomID            `json:"room_id"`
-	Join       bool              `json:"join"`
-	Master     ClientID          `json:"master"`
-	PieceCount uint8             `json:"piece_count"`
-	Players    []PlayerRoomState `json:"players"`
+	RoomID     RoomID                   `json:"room_id"`
+	Join       bool                     `json:"join"`
+	Master     ClientID                 `json:"master"`
+	PieceCount uint8                    `json:"piece_count"`
+	Players    []PlayerRoomStateRespone `json:"players"`
 }
 
 func (j JoinRoomResponse) Kind() MessageType {

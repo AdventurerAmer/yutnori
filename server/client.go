@@ -4,16 +4,18 @@ import (
 	"encoding/json"
 	"log"
 	"net"
-	"sync/atomic"
+	"sync"
 )
 
 type ClientID string
 
 type Client struct {
-	Conn    net.Conn
-	ID      ClientID
-	SendCh  chan []byte
-	IsReady atomic.Bool
+	Conn   net.Conn
+	ID     ClientID
+	SendCh chan []byte
+
+	roomMu sync.RWMutex
+	room   *Room
 }
 
 func NewClient(conn net.Conn) *Client {
@@ -22,6 +24,18 @@ func NewClient(conn net.Conn) *Client {
 		ID:     ClientID(generateUUID()),
 		SendCh: make(chan []byte, 128),
 	}
+}
+
+func (c *Client) SetRoom(room *Room) {
+	c.roomMu.Lock()
+	defer c.roomMu.Unlock()
+	c.room = room
+}
+
+func (c *Client) GetRoom() *Room {
+	c.roomMu.RLock()
+	defer c.roomMu.RUnlock()
+	return c.room
 }
 
 func (c *Client) Send(msg MessageSerializer) error {
@@ -40,7 +54,8 @@ func (c *Client) SendBytes(msg []byte) {
 func (c *Client) ReadLoop(hub *Hub) {
 	defer func() {
 		c.Conn.Close()
-		hub.ExitRoom(c.ID, false)
+		room := c.GetRoom()
+		room.Exit(c.ID, false)
 	}()
 
 	for {
@@ -49,28 +64,15 @@ func (c *Client) ReadLoop(hub *Hub) {
 			log.Println(err)
 			return
 		}
-		c.HandleMessage(hub, msg)
-	}
-}
-
-func writeMessage(conn net.Conn, msg []byte) error {
-	for {
-		_, err := conn.Write(msg)
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
-			}
-			return err
-		} else {
-			return nil
-		}
+		handleMessage(c, hub, msg)
 	}
 }
 
 func (c *Client) WriteLoop(hub *Hub) {
 	defer func() {
 		c.Conn.Close()
-		hub.ExitRoom(c.ID, false)
+		room := c.GetRoom()
+		room.Exit(c.ID, false)
 	}()
 	for {
 		select {
@@ -87,12 +89,13 @@ func (c *Client) WriteLoop(hub *Hub) {
 	}
 }
 
-func (c *Client) HandleMessage(hub *Hub, msg Message) {
+func handleMessage(c *Client, hub *Hub, msg Message) {
 	switch msg.Kind {
 	case MessageTypeCreateRoom:
 		hub.CreateRoom(c)
 	case MessageTypeExitRoom:
-		hub.ExitRoom(c.ID, false)
+		room := c.GetRoom()
+		room.Exit(c.ID, false)
 	case MessageTypeSetPieceCount:
 		req := struct {
 			PieceCount uint8 `json:"piece_count"`
@@ -109,7 +112,8 @@ func (c *Client) HandleMessage(hub *Hub, msg Message) {
 		if pieceCount < MinPieceCountInRoom {
 			pieceCount = MinPieceCountInRoom
 		}
-		hub.SetPieceCount(c, pieceCount)
+		room := c.GetRoom()
+		room.SetPieceCount(c, pieceCount)
 	case MessageTypeEnterRoom:
 		req := struct {
 			RoomID RoomID `json:"room_id"`
@@ -129,8 +133,8 @@ func (c *Client) HandleMessage(hub *Hub, msg Message) {
 			log.Println(err)
 			return
 		}
-		c.IsReady.Store(req.IsReady)
-		hub.ReadyPlayer(c, req.IsReady)
+		room := c.GetRoom()
+		room.ReadyPlayer(c, req.IsReady)
 	case MessageTypeKickPlayer:
 		req := struct {
 			Player ClientID `json:"player"`
@@ -141,6 +145,21 @@ func (c *Client) HandleMessage(hub *Hub, msg Message) {
 			return
 		}
 		log.Println("Kicking Player", req.Player)
-		hub.ExitRoom(req.Player, true)
+		room := c.GetRoom()
+		room.Exit(req.Player, true)
+	}
+}
+
+func writeMessage(conn net.Conn, msg []byte) error {
+	for {
+		_, err := conn.Write(msg)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return err
+		} else {
+			return nil
+		}
 	}
 }

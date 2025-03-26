@@ -10,43 +10,21 @@ type EnterRoomParams struct {
 	Room   RoomID
 }
 
-type ExitRoomParams struct {
-	Client ClientID
-	Kicked bool
-}
-
-type SetPieceCountParams struct {
-	Client     *Client
-	PieceCount uint8
-}
-
-type PlayerReadyParams struct {
-	Client  *Client
-	IsReady bool
-}
-
 type Hub struct {
 	RegisterClientCh chan net.Conn
 	Rooms            map[RoomID]*Room
-	ClientToRoom     map[ClientID]*Room
-
-	CreateRoomCh    chan *Client
-	EnterRoomCh     chan EnterRoomParams
-	ExitRoomCh      chan ExitRoomParams
-	SetPieceCountCh chan SetPieceCountParams
-	PlayerReadyCh   chan PlayerReadyParams
+	CreateRoomCh     chan *Client
+	EnterRoomCh      chan EnterRoomParams
+	DestroyRoomCh    chan *Room
 }
 
 func NewHub() *Hub {
 	return &Hub{
 		Rooms:            make(map[RoomID]*Room),
-		ClientToRoom:     make(map[ClientID]*Room),
 		RegisterClientCh: make(chan net.Conn),
 		CreateRoomCh:     make(chan *Client),
 		EnterRoomCh:      make(chan EnterRoomParams),
-		ExitRoomCh:       make(chan ExitRoomParams),
-		SetPieceCountCh:  make(chan SetPieceCountParams),
-		PlayerReadyCh:    make(chan PlayerReadyParams),
+		DestroyRoomCh:    make(chan *Room),
 	}
 }
 
@@ -65,75 +43,52 @@ func (h *Hub) HandleClients() {
 			go client.WriteLoop(h)
 		case client := <-h.CreateRoomCh:
 			room := NewRoom(client)
+			err := client.Send(CreateRoomMessage{RoomID: room.ID})
+			if err != nil {
+				log.Println(err)
+				break
+			}
 			h.Rooms[room.ID] = room
-			h.ClientToRoom[client.ID] = room
-			client.Send(CreateRoomMessage{RoomID: room.ID})
-		case msg := <-h.EnterRoomCh:
-			c, roomID := msg.Client, msg.Room
-			room := h.Rooms[roomID]
-			h.ClientToRoom[c.ID] = room
-			room.Enter(roomID, c)
-		case msg := <-h.ExitRoomCh:
-			c, kicked := msg.Client, msg.Kicked
-			room := h.ClientToRoom[c]
-			if room != nil {
-				err := room.Exit(c, kicked)
-				if err != nil {
-					log.Println(err)
-				}
-				delete(h.ClientToRoom, c)
-				if len(room.Clients) == 0 {
-					delete(h.Rooms, room.ID)
-				}
-				log.Println("Client Exited", c)
-			}
-		case msg := <-h.SetPieceCountCh:
-			c, pieceCount := msg.Client, msg.PieceCount
-			room := h.ClientToRoom[c.ID]
-			if room == nil {
-				msg.Client.Send(SetPieceMessage{ShouldSet: false})
-				break
-			}
-			if c != room.Master {
-				msg.Client.Send(SetPieceMessage{ShouldSet: false})
-				break
-			}
-			room.PieceCount = pieceCount
-			err := room.Broadcast(SetPieceMessage{ShouldSet: true, PieceCount: pieceCount})
-			if err != nil {
-				log.Println(err)
-			}
-		case msg := <-h.PlayerReadyCh:
-			c, isReady := msg.Client, msg.IsReady
-			room := h.ClientToRoom[c.ID]
-			err := room.Broadcast(PlayerReadyResponse{Player: c.ID, IsReady: isReady})
-			if err != nil {
-				log.Println(err)
-			}
+			client.SetRoom(room)
+			go room.ReadLoop(h)
+			log.Printf("hub created room '%s'\n", room.ID)
+		case params := <-h.EnterRoomCh:
+			client := params.Client
+			room := h.Rooms[params.Room]
+			room.Enter(client)
+			log.Printf("client '%s' wants to enter room '%s'\n", client.ID, room.ID)
+		case room := <-h.DestroyRoomCh:
+			delete(h.Rooms, room.ID)
+			log.Printf("hub destroyed room '%s'\n", room.ID)
 		}
 	}
 }
 
 func (h *Hub) RegisterClient(conn net.Conn) {
+	if h == nil {
+		return
+	}
 	h.RegisterClientCh <- conn
 }
 
 func (h *Hub) CreateRoom(client *Client) {
+	if h == nil {
+		return
+	}
 	h.CreateRoomCh <- client
 }
 
-func (h *Hub) ExitRoom(client ClientID, kicked bool) {
-	h.ExitRoomCh <- ExitRoomParams{Client: client, Kicked: kicked}
-}
-
 func (h *Hub) EnterRoom(client *Client, room RoomID) {
+	if h == nil {
+		return
+	}
 	h.EnterRoomCh <- EnterRoomParams{Client: client, Room: room}
+	log.Println("EnterRoomCh")
 }
 
-func (h *Hub) SetPieceCount(client *Client, pieceCount uint8) {
-	h.SetPieceCountCh <- SetPieceCountParams{Client: client, PieceCount: pieceCount}
-}
-
-func (h *Hub) ReadyPlayer(client *Client, isReady bool) {
-	h.PlayerReadyCh <- PlayerReadyParams{Client: client, IsReady: isReady}
+func (h *Hub) DestroyRoom(room *Room) {
+	if h == nil {
+		return
+	}
+	h.DestroyRoomCh <- room
 }
