@@ -30,6 +30,9 @@ const (
 	MessageTypeEndRoll
 	MessageTypeEndTurn
 	MessageTypeSelectingMove
+	MessageTypeBeginMove
+	MessageTypeEndMove
+	MessageTypeEndGame
 )
 
 type Message struct {
@@ -152,6 +155,26 @@ type SelectingMoveResponse struct{}
 
 func (s SelectingMoveResponse) Kind() MessageType {
 	return MessageTypeSelectingMove
+}
+
+type BeginMoveRespone struct {
+	ShouldMove bool   `json:"should_move"`
+	Roll       int    `json:"roll"`
+	Cell       CellID `json:"cell"`
+	Piece      int    `json:"piece"`
+	Finished   bool   `json:"finished"`
+}
+
+func (b BeginMoveRespone) Kind() MessageType {
+	return MessageTypeBeginMove
+}
+
+type EndGameResponse struct {
+	Winner ClientID `json:"winner"`
+}
+
+func (b EndGameResponse) Kind() MessageType {
+	return MessageTypeEndGame
 }
 
 func ReadMessage(conn net.Conn) (Message, error) {

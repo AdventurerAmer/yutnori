@@ -44,6 +44,9 @@ func (s *Server) Start() error {
 }
 
 func main() {
+
+	log.SetFlags(log.Llongfile | log.LUTC)
+
 	cfg := Config{}
 	flag.IntVar(&cfg.Port, "port", 42069, "port of the server")
 	flag.Parse()

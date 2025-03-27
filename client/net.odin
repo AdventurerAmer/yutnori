@@ -44,6 +44,9 @@ Net_Message_Type :: enum u8 {
 	EndRoll,
 	EndTurn,
 	SelectingMove,
+	BeginMove,
+	EndMove,
+	EndGame,
 }
 
 Net_Message :: struct {
@@ -72,6 +75,19 @@ Ready_Request :: struct {
 }
 Start_Game_Request :: struct {}
 Begin_Roll_Request :: struct {}
+
+Begin_Move_Request :: struct {
+	roll:  int `json:"roll"`,
+	piece: int `json:"piece"`,
+	cell:  int `json:"cell"`,
+}
+
+End_Move_Request :: struct {
+	roll:  int `json:"roll"`,
+	piece: int `json:"piece"`,
+	cell:  int `json:"cell"`,
+}
+
 Net_Request :: union {
 	Connect_Request,
 	Disconnect_Request,
@@ -84,6 +100,8 @@ Net_Request :: union {
 	Kick_Player_Request,
 	Start_Game_Request,
 	Begin_Roll_Request,
+	Begin_Move_Request,
+	End_Move_Request,
 }
 
 Connect_Response :: struct {
@@ -152,6 +170,17 @@ End_Turn_Response :: struct {
 }
 
 Selecting_Move_Response :: struct {}
+Begin_Move_Response :: struct {
+	should_move: bool `json:"should_move"`,
+	roll:        int `json:"roll"`,
+	cell:        Cell_ID `json:"cell"`,
+	piece:       int `json:"piece"`,
+	finished:    bool `json:"finished",`,
+}
+
+End_Game_Response :: struct {
+	winner: string `json:"winner"`,
+}
 
 send_message :: proc(
 	socket: net.TCP_Socket,
@@ -356,6 +385,18 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 			if err != nil {
 				fmt.println(err)
 			}
+		case Begin_Move_Request:
+			if socket == 0 do break
+			err := send_message(socket, Net_Message{kind = .BeginMove, payload = msg_payload})
+			if err != nil {
+				fmt.println(err)
+			}
+		case End_Move_Request:
+			if socket == 0 do break
+			err := send_message(socket, Net_Message{kind = .EndMove, payload = msg_payload})
+			if err != nil {
+				fmt.println(err)
+			}
 		}
 	}
 	fmt.println("sender finished")
@@ -535,4 +576,36 @@ net_roll :: proc(game_state: ^Game_State) {
 	game_state.is_trying_to_roll = true
 	push_net_request(game_state, Begin_Roll_Request{})
 	game_state.current_action = .BeginRoll
+}
+
+net_begin_move :: proc(game_state: ^Game_State, piece_idx: int, move: Move) {
+	if !game_state.connected ||
+	   game_state.room_id == "" ||
+	   game_state.current_action != .SelectingMove {
+		return
+	}
+	push_net_request(
+		game_state,
+		Begin_Move_Request {
+			piece = piece_idx,
+			roll = auto_cast move.roll,
+			cell = auto_cast move.cell,
+		},
+	)
+	game_state.current_action = .Waiting
+}
+
+net_end_move :: proc(game_state: ^Game_State, piece_idx: int, move: Move) {
+	if !game_state.connected || game_state.room_id == "" || game_state.current_action != .OnMove {
+		return
+	}
+	push_net_request(
+		game_state,
+		End_Move_Request {
+			piece = piece_idx,
+			roll = auto_cast move.roll,
+			cell = auto_cast move.cell,
+		},
+	)
+	game_state.current_action = .Waiting
 }

@@ -195,6 +195,54 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 			break
 		}
 		room.Roll(c)
+	case MessageTypeBeginMove:
+		req := struct {
+			Roll  int    `json:"roll"`
+			Cell  CellID `json:"cell"`
+			Piece int    `json:"piece"`
+		}{}
+		err := json.Unmarshal(msg.Payload, &req)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		room := getRoom(c)
+		if room == nil {
+			break
+		}
+		room.BeginMoveCh <- MoveParams{
+			Client: c,
+			Move: Move{
+				Roll:  req.Roll,
+				Cell:  req.Cell,
+				Piece: req.Piece,
+			},
+		}
+		log.Printf("%+v\n", req)
+	case MessageTypeEndMove:
+		req := struct {
+			Roll  int    `json:"roll"`
+			Cell  CellID `json:"cell"`
+			Piece int    `json:"piece"`
+		}{}
+		err := json.Unmarshal(msg.Payload, &req)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		room := getRoom(c)
+		if room == nil {
+			break
+		}
+		room.EndMoveCh <- MoveParams{
+			Client: c,
+			Move: Move{
+				Roll:  req.Roll,
+				Cell:  req.Cell,
+				Piece: req.Piece,
+			},
+		}
+		log.Printf("%+v\n", req)
 	}
 }
 
