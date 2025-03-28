@@ -170,6 +170,7 @@ End_Turn_Response :: struct {
 }
 
 Selecting_Move_Response :: struct {}
+
 Begin_Move_Response :: struct {
 	should_move: bool `json:"should_move"`,
 	roll:        int `json:"roll"`,
@@ -193,8 +194,18 @@ send_message :: proc(
 	if len(msg.payload) != 0 {
 		copy(data[3:], msg.payload)
 	}
-	_, err := net.send_tcp(socket, data)
-	return err
+	for {
+		_, err := net.send_tcp(socket, data)
+		if err != nil {
+			if tcp_send_err, ok := err.(net.TCP_Send_Error); ok && tcp_send_err == .Timeout {
+				continue
+			}
+			return err
+		} else {
+			return nil
+		}
+	}
+	return nil
 }
 
 read_message :: proc(
@@ -205,19 +216,34 @@ read_message :: proc(
 	net.Network_Error,
 ) {
 	msg_header_buf := [3]u8{}
-	_, err := net.recv_tcp(socket, msg_header_buf[:])
-	if err != nil {
-		return {}, err
+
+	for {
+		_, err := net.recv_tcp(socket, msg_header_buf[:])
+		if err != nil {
+			if recv_tcp_err, ok := err.(net.TCP_Recv_Error); ok && recv_tcp_err == .Timeout {
+				continue
+			}
+			return {}, err
+		} else {
+			break
+		}
 	}
+
 	kind := msg_header_buf[0]
 	payload_len, ok := endian.get_u16(msg_header_buf[1:], .Big)
-	if !ok {
-		return {}, err
-	}
+	assert(ok)
+
 	payload := make([]u8, payload_len, allocator)
-	_, err = net.recv_tcp(socket, payload[:])
-	if err != nil {
-		return {}, err
+	for {
+		_, err := net.recv_tcp(socket, payload[:])
+		if err != nil {
+			if recv_tcp_err, ok := err.(net.TCP_Recv_Error); ok && recv_tcp_err == .Timeout {
+				continue
+			}
+			return {}, err
+		} else {
+			break
+		}
 	}
 	msg := Net_Message {
 		kind    = auto_cast kind,
@@ -378,7 +404,6 @@ sender_thread_proc :: proc(t: ^thread.Thread) {
 				push_net_response(game_state, compose_net_msg(.StartGame, Start_Game_Response{}))
 				break
 			}
-			fmt.println("sending start game")
 		case Begin_Roll_Request:
 			if socket == 0 do break
 			err := send_message(socket, Net_Message{kind = .BeginRoll, payload = msg_payload})
@@ -452,7 +477,6 @@ receiver_thread_proc :: proc(t: ^thread.Thread) {
 			push_net_response(game_state, msg)
 		}
 	}
-	fmt.println("reciver finished")
 }
 
 push_net_request :: proc(game_state: ^Game_State, cmd: Net_Request) {
@@ -595,16 +619,17 @@ net_begin_move :: proc(game_state: ^Game_State, piece_idx: int, move: Move) {
 	game_state.current_action = .Waiting
 }
 
-net_end_move :: proc(game_state: ^Game_State, piece_idx: int, move: Move) {
+net_end_target_move :: proc(game_state: ^Game_State) {
 	if !game_state.connected || game_state.room_id == "" || game_state.current_action != .OnMove {
 		return
 	}
+	apply_move(game_state, game_state.target_move)
 	push_net_request(
 		game_state,
 		End_Move_Request {
-			piece = piece_idx,
-			roll = auto_cast move.roll,
-			cell = auto_cast move.cell,
+			piece = auto_cast game_state.target_piece,
+			roll = auto_cast game_state.target_move.roll,
+			cell = auto_cast game_state.target_move.cell,
 		},
 	)
 	game_state.current_action = .Waiting

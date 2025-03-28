@@ -401,7 +401,11 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 		{
 			w := get_widget(layout, start_id)
 			if rl.GuiButton(w.rect, w.text) {
-				start_game(game_state)
+				if game_state.game_mode == .Local {
+					start_game(game_state)
+				} else {
+					net_start_game(game_state)
+				}
 			}
 		}
 

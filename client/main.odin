@@ -192,13 +192,10 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	game_state.current_action = .None
 }
 
+
 start_game :: proc(game_state: ^Game_State) {
-	if game_state.game_mode == .Online {
-		net_start_game(game_state)
-	} else {
-		game_state.player_turn_index = rand.int31_max(game_state.player_count)
-		game_state.current_action = .GameStarted
-	}
+	game_state.player_turn_index = rand.int31_max(game_state.player_count)
+	game_state.current_action = .GameStarted
 }
 
 end_game :: proc(game_state: ^Game_State) {
@@ -207,14 +204,12 @@ end_game :: proc(game_state: ^Game_State) {
 }
 
 begin_turn :: proc(game_state: ^Game_State) {
-	if game_state.game_mode == .Online do return
 	if game_state.current_action == .GameStarted || game_state.current_action == .EndTurn {
 		game_state.current_action = .BeginTurn
 	}
 }
 
 end_turn :: proc(game_state: ^Game_State) {
-	if game_state.game_mode == .Online do return
 	game_state.player_turn_index += 1
 	game_state.player_turn_index %= game_state.player_count
 	game_state.current_action = .BeginTurn
@@ -245,26 +240,20 @@ roll :: proc(game_state: ^Game_State) -> i32 {
 }
 
 can_roll :: proc(game_state: ^Game_State) {
-	if game_state.game_mode == .Online do return
 	game_state.current_action = .CanRoll
 }
 
 begin_roll :: proc(game_state: ^Game_State) {
-	if game_state.game_mode == .Online {
-		net_roll(game_state)
-		return
-	}
 	game_state.current_action = .BeginRoll
 }
 
 end_roll :: proc(game_state: ^Game_State) {
-	if game_state.game_mode == .Online do return
 	n := roll(game_state)
-	fmt.printf("roll: %d\n", n)
 	game_state.current_action = .EndRoll
+	fmt.printf("roll was: %d\n", n)
 }
 
-on_move :: proc(game_state: ^Game_State) {
+on_move :: proc(game_state: ^Game_State) -> bool {
 	draw_state := game_state.draw_state
 	player := &game_state.players[game_state.player_turn_index]
 	piece := player.pieces[game_state.target_piece]
@@ -277,8 +266,7 @@ on_move :: proc(game_state: ^Game_State) {
 		}
 	}
 	if int(game_state.move_seq_idx) >= len(seq) - 1 {
-		end_move(game_state)
-		return
+		return true
 	}
 	dt := rl.GetFrameTime()
 	from := Vec2{}
@@ -304,10 +292,10 @@ on_move :: proc(game_state: ^Game_State) {
 		game_state.target_position_percent = 0.0
 		game_state.move_seq_idx += 1
 	}
+	return false
 }
 
-end_move :: proc(game_state: ^Game_State) {
-	move := game_state.target_move
+apply_move :: proc(game_state: ^Game_State, move: Move) -> (stomped: bool) {
 	current_player := &game_state.players[game_state.player_turn_index]
 	piece_to_move := current_player.pieces[game_state.target_piece]
 
@@ -330,7 +318,6 @@ end_move :: proc(game_state: ^Game_State) {
 	}
 
 	// stomping an opponent piece
-	stomped := false
 	for player_idx in 0 ..< game_state.player_count {
 		player := &game_state.players[player_idx]
 		for piece_idx in 0 ..< game_state.piece_count {
@@ -356,51 +343,53 @@ end_move :: proc(game_state: ^Game_State) {
 	}
 
 	ordered_remove(&game_state.rolls, roll_index)
+	return stomped
+}
 
-	if game_state.game_mode == .Local {
-		finished_pieces_count := i32(0)
-		for piece_idx in 0 ..< game_state.piece_count {
-			piece := current_player.pieces[piece_idx]
-			if piece.finished {
-				finished_pieces_count += 1
-			}
+end_target_move :: proc(game_state: ^Game_State) {
+	move := game_state.target_move
+	stomped := apply_move(game_state, move)
+	current_player := &game_state.players[game_state.player_turn_index]
+	finished_pieces_count := i32(0)
+	for piece_idx in 0 ..< game_state.piece_count {
+		piece := current_player.pieces[piece_idx]
+		if piece.finished {
+			finished_pieces_count += 1
 		}
-		if finished_pieces_count == game_state.piece_count {
-			end_game(game_state)
-		} else {
-			if stomped {
-				game_state.current_action = .CanRoll
-			} else if len(game_state.rolls) != 0 {
-				game_state.current_action = .SelectingMove
-			} else {
-				game_state.current_action = .EndTurn
-			}
-		}
+	}
+	if finished_pieces_count == game_state.piece_count {
+		end_game(game_state)
 	} else {
-		net_end_move(game_state, auto_cast game_state.target_piece, game_state.target_move)
+		if stomped {
+			game_state.current_action = .CanRoll
+		} else if len(game_state.rolls) != 0 {
+			game_state.current_action = .SelectingMove
+		} else {
+			game_state.current_action = .EndTurn
+		}
 	}
 }
 
 attempt_move :: proc(game_state: ^Game_State, move: Move) {
-	if game_state.game_mode == .Local {
-		game_state.target_piece = game_state.selected_piece_index
-		game_state.target_move = move
-		game_state.move_seq_idx = -1
-		game_state.target_position_percent = 0
-		game_state.current_action = .OnMove
-	} else {
-		net_begin_move(game_state, auto_cast game_state.selected_piece_index, move)
-	}
+	game_state.target_piece = game_state.selected_piece_index
+	game_state.target_move = move
+	game_state.move_seq_idx = -1
+	game_state.target_position_percent = 0
+	game_state.current_action = .OnMove
 	game_state.selected_piece_index = -1
 }
 
-select_move :: proc(game_state: ^Game_State, style: UI_Style) {
+net_attempt_move :: proc(game_state: ^Game_State, move: Move) {
+	net_begin_move(game_state, auto_cast game_state.selected_piece_index, move)
+	game_state.selected_piece_index = -1
+}
+
+select_move :: proc(game_state: ^Game_State, style: UI_Style) -> (Move, bool) {
 	draw_state := game_state.draw_state
 	screen_size := draw_state.screen_size
 	piece_size := draw_state.piece_size
 
 	current_player := game_state.players[game_state.player_turn_index]
-	moved_this_frame := false
 
 	// select a move
 	{
@@ -418,15 +407,9 @@ select_move :: proc(game_state: ^Game_State, style: UI_Style) {
 			r := Rect{pos.x, pos.y, piece_size.x, piece_size.y}
 			if rl.CheckCollisionPointRec(rl.GetMousePosition(), r) &&
 			   rl.IsMouseButtonPressed(.LEFT) {
-				attempt_move(game_state, move)
-				moved_this_frame = true
-				break
+				return move, true
 			}
 		}
-	}
-
-	if moved_this_frame {
-		return
 	}
 
 	// select piece
@@ -497,6 +480,8 @@ select_move :: proc(game_state: ^Game_State, style: UI_Style) {
 			}
 		}
 	}
+
+	return {}, false
 }
 
 get_current_player_moves :: proc(
@@ -620,22 +605,47 @@ main :: proc() {
 			draw_state := game_state.draw_state
 			piece_size := draw_state.piece_size
 
-			switch game_state.current_action {
-			case .None:
-			case .GameStarted:
-				fmt.println("game has started")
-				begin_turn(game_state)
-			case .GameEnded:
-				fmt.printf("game has ended P%d won\n", game_state.player_won_index + 1)
-			case .BeginTurn:
-				can_roll(game_state)
-			case .EndTurn:
-				end_turn(game_state)
-			case .CanRoll:
-			case .BeginRoll:
-				end_roll(game_state)
-			case .EndRoll:
-				if game_state.game_mode == .Local {
+			if game_state.game_mode == .Online {
+				switch game_state.current_action {
+				case .None:
+				case .GameStarted:
+				case .GameEnded:
+				case .BeginTurn:
+				case .EndTurn:
+				case .CanRoll:
+				case .BeginRoll:
+				case .EndRoll:
+				case .Waiting:
+				case .OnMove:
+					ended := on_move(game_state)
+					if ended {
+						net_end_target_move(game_state)
+					}
+				case .SelectingMove:
+					if rl.IsKeyPressed(.Q) {
+						game_state.selected_piece_index = -1
+					}
+					move, selected := select_move(game_state, default_style)
+					if selected {
+						net_attempt_move(game_state, move)
+					}
+				}
+			} else {
+				switch game_state.current_action {
+				case .None:
+				case .GameStarted:
+					fmt.println("game has started")
+					begin_turn(game_state)
+				case .GameEnded:
+					fmt.printf("game has ended P%d won\n", game_state.player_won_index + 1)
+				case .BeginTurn:
+					can_roll(game_state)
+				case .EndTurn:
+					end_turn(game_state)
+				case .CanRoll:
+				case .BeginRoll:
+					end_roll(game_state)
+				case .EndRoll:
 					fmt.println("end roll")
 					roll_count := len(game_state.rolls)
 					if roll_count == 0 {
@@ -646,15 +656,21 @@ main :: proc() {
 					} else {
 						game_state.current_action = .SelectingMove
 					}
+				case .Waiting:
+				case .OnMove:
+					ended := on_move(game_state)
+					if ended {
+						end_target_move(game_state)
+					}
+				case .SelectingMove:
+					if rl.IsKeyPressed(.Q) {
+						game_state.selected_piece_index = -1
+					}
+					move, selected := select_move(game_state, default_style)
+					if selected {
+						attempt_move(game_state, move)
+					}
 				}
-			case .Waiting:
-			case .OnMove:
-				on_move(game_state)
-			case .SelectingMove:
-				if rl.IsKeyPressed(.Q) {
-					game_state.selected_piece_index = -1
-				}
-				select_move(game_state, default_style)
 			}
 
 			draw(game_state, default_style)
@@ -907,7 +923,11 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 			}
 
 			if rl.GuiButton(r, text) {
-				begin_roll(game_state)
+				if game_state.game_mode == .Online {
+					net_roll(game_state)
+				} else {
+					begin_roll(game_state)
+				}
 			}
 
 			rl.GuiEnable()
