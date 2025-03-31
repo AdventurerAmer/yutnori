@@ -83,7 +83,6 @@ func (h *Hub) EnterRoom(client *Client, room RoomID) {
 		return
 	}
 	h.EnterRoomCh <- EnterRoomParams{Client: client, Room: room}
-	log.Println("EnterRoomCh")
 }
 
 func (h *Hub) DestroyRoom(room *Room) {

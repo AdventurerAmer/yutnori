@@ -44,7 +44,6 @@ func (s *Server) Start() error {
 }
 
 func main() {
-
 	log.SetFlags(log.Llongfile | log.LUTC)
 
 	cfg := Config{}

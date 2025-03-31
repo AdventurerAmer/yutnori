@@ -141,7 +141,7 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 			c.Send(SetPieceResponse{})
 			break
 		}
-		room.SetPieceCount(c, pieceCount)
+		room.ExecuteGameAction(c, SetPieceCountGameAction{PieceCount: pieceCount})
 	case MessageTypeEnterRoom:
 		req := struct {
 			RoomID RoomID `json:"room_id"`
@@ -194,7 +194,7 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 		if room == nil {
 			break
 		}
-		room.Roll(c)
+		room.ExecuteGameAction(c, BeginRollGameAction{})
 	case MessageTypeBeginMove:
 		req := struct {
 			Roll  int    `json:"roll"`
@@ -210,15 +210,13 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 		if room == nil {
 			break
 		}
-		room.BeginMoveCh <- MoveParams{
-			Client: c,
+		room.ExecuteGameAction(c, BeginMoveGameAction{
 			Move: Move{
 				Roll:  req.Roll,
 				Cell:  req.Cell,
 				Piece: req.Piece,
 			},
-		}
-		log.Printf("%+v\n", req)
+		})
 	case MessageTypeEndMove:
 		req := struct {
 			Roll  int    `json:"roll"`
@@ -234,15 +232,13 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 		if room == nil {
 			break
 		}
-		room.EndMoveCh <- MoveParams{
-			Client: c,
+		room.ExecuteGameAction(c, EndMoveGameAction{
 			Move: Move{
 				Roll:  req.Roll,
 				Cell:  req.Cell,
 				Piece: req.Piece,
 			},
-		}
-		log.Printf("%+v\n", req)
+		})
 	}
 }
 
