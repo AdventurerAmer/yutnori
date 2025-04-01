@@ -136,6 +136,10 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 deinit_game :: proc(game_state: ^Game_State) {
 	reset_net_state(game_state)
 	delete(game_state.rolls)
+	if game_state.players[0].name != "" {
+		delete(game_state.players[0].name)
+		game_state.players[0].name = ""
+	}
 	delete(game_state.players)
 	if game_state.net_sender_thread != nil {
 		push_net_request(game_state, Quit_Request{})
@@ -191,7 +195,6 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	game_state.selected_piece_index = -1
 	game_state.current_action = .None
 }
-
 
 start_game :: proc(game_state: ^Game_State) {
 	game_state.player_turn_index = rand.int31_max(game_state.player_count)
@@ -539,11 +542,15 @@ main :: proc() {
 	game_state := init_game()
 	defer deinit_game(game_state)
 
+	if game_state.players[0].name == "" {
+		game_state.players[0].name = strings.clone("Harlequin", context.allocator)
+	}
+
 	font := rl.GetFontDefault()
 
 	default_style := UI_Style {
 		font         = rl.GetFontDefault(),
-		font_size    = f32(32),
+		font_size    = f32(30),
 		font_spacing = f32(2),
 	}
 	rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SIZE), i32(default_style.font_size))
@@ -1037,7 +1044,13 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 				color.a = 128
 			}
 
-			text := fmt.ctprintf("P%v", player_idx + 1)
+			text: cstring
+
+			if game_state.game_mode == .Local {
+				text = fmt.ctprintf("P%v", player_idx + 1)
+			} else {
+				text = fmt.ctprintf("%s", game_state.players[player_idx].name)
+			}
 			size := rl.MeasureTextEx(style.font, text, style.font_size, style.font_spacing)
 
 			offset: ^Vec2
@@ -1324,7 +1337,9 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 				if p.is_ready do game_state.room_ready_player_count += 1
 				idx := game_state.room_player_count
 				game_state.players[idx].client_id = strings.clone(p.client_id)
+				game_state.players[idx].name = strings.clone(p.name)
 				game_state.room_player_count += 1
+
 			}
 			game_state.screen_state = .Room
 			game_state.room_id = strings.clone(resp.room_id)
@@ -1332,7 +1347,13 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 	case .PlayerJoined:
 		resp := Player_Joined_Response{}
 		parse_msg(msg, &resp)
-		game_state.players[game_state.room_player_count].client_id = strings.clone(resp.client_id)
+		fmt.println("player joined...", resp)
+		if resp.client_id != game_state.players[0].client_id {
+			game_state.players[game_state.room_player_count].client_id = strings.clone(
+				resp.client_id,
+			)
+			game_state.players[game_state.room_player_count].name = strings.clone(resp.name)
+		}
 		game_state.room_player_count += 1
 	case .KickPlayer:
 	case .Ready:
@@ -1422,7 +1443,7 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		resp := End_Game_Response{}
 		parse_msg(msg, &resp)
 		player_won_index := i32(-1)
-		for i := i32(0); i < game_state.player_count; i += 1 {
+		for i in 0 ..< game_state.player_count {
 			if game_state.players[i].client_id == resp.winner {
 				player_won_index = i
 				break
@@ -1430,6 +1451,20 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 		}
 		assert(player_won_index == game_state.player_turn_index)
 		end_game(game_state)
+	case .ChangeName:
+		resp := Change_Name_Response{}
+		parse_msg(msg, &resp)
+		fmt.println(resp)
+		for i in 1 ..< game_state.player_count {
+			if game_state.players[i].client_id == resp.player {
+				if game_state.players[i].name != "" {
+					delete(game_state.players[i].name)
+					game_state.players[i].name = ""
+				}
+				game_state.players[i].name = strings.clone(resp.name)
+				break
+			}
+		}
 	}
 }
 
@@ -1442,10 +1477,17 @@ reset_net_state :: proc(game_state: ^Game_State) {
 
 reset_room_state :: proc(game_state: ^Game_State) {
 	for i in 1 ..< MAX_PLAYER_COUNT {
-		if game_state.players[i].client_id == "" do continue
-		delete(game_state.players[i].client_id)
-		game_state.players[i].client_id = ""
 		game_state.players[i].is_ready = false
+
+		if game_state.players[i].client_id != "" {
+			delete(game_state.players[i].client_id)
+			game_state.players[i].client_id = ""
+		}
+
+		if game_state.players[i].name != "" {
+			delete(game_state.players[i].name)
+			game_state.players[i].name = ""
+		}
 	}
 
 	delete(game_state.room_id)

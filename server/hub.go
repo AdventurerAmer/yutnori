@@ -5,15 +5,21 @@ import (
 	"net"
 )
 
+type CreateRoomParams struct {
+	Client     *Client
+	ClientName string
+}
+
 type EnterRoomParams struct {
-	Client *Client
-	Room   RoomID
+	Client     *Client
+	ClientName string
+	Room       RoomID
 }
 
 type Hub struct {
 	RegisterClientCh chan net.Conn
 	Rooms            map[RoomID]*Room
-	CreateRoomCh     chan *Client
+	CreateRoomCh     chan CreateRoomParams
 	EnterRoomCh      chan EnterRoomParams
 	DestroyRoomCh    chan *Room
 }
@@ -22,7 +28,7 @@ func NewHub() *Hub {
 	return &Hub{
 		Rooms:            make(map[RoomID]*Room),
 		RegisterClientCh: make(chan net.Conn),
-		CreateRoomCh:     make(chan *Client),
+		CreateRoomCh:     make(chan CreateRoomParams),
 		EnterRoomCh:      make(chan EnterRoomParams),
 		DestroyRoomCh:    make(chan *Room),
 	}
@@ -41,22 +47,24 @@ func (h *Hub) HandleClients() {
 			}
 			go client.ReadLoop(h)
 			go client.WriteLoop(h)
-		case client := <-h.CreateRoomCh:
-			room := NewRoom(client)
-			err := client.Send(CreateRoomResponse{RoomID: room.ID})
+		case params := <-h.CreateRoomCh:
+			room := NewRoom(params.Client, params.ClientName)
+			err := params.Client.Send(CreateRoomResponse{RoomID: room.ID})
 			if err != nil {
 				log.Println(err)
 				break
 			}
 			h.Rooms[room.ID] = room
-			client.EnterRoom(room)
+			params.Client.EnterRoom(room)
 			go room.ReadLoop(h)
 			log.Printf("hub created room '%s'\n", room.ID)
 		case params := <-h.EnterRoomCh:
 			client := params.Client
 			room := h.Rooms[params.Room]
-			room.Enter(client)
-			log.Printf("client '%s' wants to enter room '%s'\n", client.ID, room.ID)
+			if room != nil {
+				room.Enter(client, params.ClientName)
+				log.Printf("client '%s' wants to enter room '%s'\n", client.ID, room.ID)
+			}
 		case room := <-h.DestroyRoomCh:
 			delete(h.Rooms, room.ID)
 			log.Printf("hub destroyed room '%s'\n", room.ID)
@@ -71,18 +79,18 @@ func (h *Hub) RegisterClient(conn net.Conn) {
 	h.RegisterClientCh <- conn
 }
 
-func (h *Hub) CreateRoom(client *Client) {
+func (h *Hub) CreateRoom(client *Client, clientName string) {
 	if h == nil {
 		return
 	}
-	h.CreateRoomCh <- client
+	h.CreateRoomCh <- CreateRoomParams{Client: client, ClientName: clientName}
 }
 
-func (h *Hub) EnterRoom(client *Client, room RoomID) {
+func (h *Hub) EnterRoom(client *Client, clientName string, room RoomID) {
 	if h == nil {
 		return
 	}
-	h.EnterRoomCh <- EnterRoomParams{Client: client, Room: room}
+	h.EnterRoomCh <- EnterRoomParams{Client: client, ClientName: clientName, Room: room}
 }
 
 func (h *Hub) DestroyRoom(room *Room) {

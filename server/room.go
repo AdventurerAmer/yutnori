@@ -38,7 +38,7 @@ type Room struct {
 	Master       *Client
 	GameInstance *GameInstance
 
-	EnterRoomCh   chan *Client
+	EnterRoomCh   chan EnterRoomParams
 	ExitRoomCh    chan ExitRoomParams
 	PlayerReadyCh chan PlayerReadyParams
 	StartGameCh   chan *Client
@@ -46,40 +46,55 @@ type Room struct {
 	GameActionCh chan GameActionParams
 }
 
-func NewRoom(master *Client) *Room {
+func NewRoom(master *Client, masterName string) *Room {
 	r := &Room{
 		ID:           RoomID(generateUUID()),
 		Master:       master,
 		GameInstance: NewGameInstance(),
 
-		EnterRoomCh:   make(chan *Client),
+		EnterRoomCh:   make(chan EnterRoomParams),
 		ExitRoomCh:    make(chan ExitRoomParams),
 		PlayerReadyCh: make(chan PlayerReadyParams),
 		StartGameCh:   make(chan *Client),
 
 		GameActionCh: make(chan GameActionParams),
 	}
-	r.GameInstance.Players = append(r.GameInstance.Players, PlayerState{Client: master})
+	r.GameInstance.Players = append(r.GameInstance.Players, PlayerState{Client: master, Name: masterName})
 	return r
 }
 
-func (r *Room) Enter(client *Client) {
-	r.EnterRoomCh <- client
+func (r *Room) Enter(client *Client, clientName string) {
+	if r == nil {
+		return
+	}
+	r.EnterRoomCh <- EnterRoomParams{Client: client, ClientName: clientName}
 }
 
 func (r *Room) Exit(client ClientID, kicked bool) {
+	if r == nil {
+		return
+	}
 	r.ExitRoomCh <- ExitRoomParams{Client: client, Kicked: kicked}
 }
 
 func (r *Room) ReadyPlayer(client *Client, isReady bool) {
+	if r == nil {
+		return
+	}
 	r.PlayerReadyCh <- PlayerReadyParams{Client: client, IsReady: isReady}
 }
 
 func (r *Room) StartGame(client *Client) {
+	if r == nil {
+		return
+	}
 	r.StartGameCh <- client
 }
 
 func (r *Room) ExecuteGameAction(c *Client, e GameExecutor) {
+	if r == nil {
+		return
+	}
 	r.GameActionCh <- GameActionParams{Client: c, Executor: e}
 }
 
@@ -87,8 +102,8 @@ func (r *Room) ReadLoop(hub *Hub) {
 	defer hub.DestroyRoom(r)
 	for {
 		select {
-		case client := <-r.EnterRoomCh:
-			enter(r, client)
+		case params := <-r.EnterRoomCh:
+			enter(r, params.Client, params.ClientName)
 		case msg := <-r.ExitRoomCh:
 			err := exit(r, msg.Client, msg.Kicked)
 			if err != nil {
@@ -135,7 +150,7 @@ func (r *Room) Broadcast(serializer MessageSerializer) error {
 	return nil
 }
 
-func enter(r *Room, client *Client) {
+func enter(r *Room, client *Client, clientName string) {
 	if len(r.GameInstance.Players) == MaxPlayerCountInRoom {
 		client.Send(JoinRoomResponse{})
 		return
@@ -145,6 +160,7 @@ func enter(r *Room, client *Client) {
 		state := PlayerRoomStateRespone{
 			ClientID: p.Client.ID,
 			IsReady:  p.IsReady,
+			Name:     p.Name,
 		}
 		players = append(players, state)
 	}
@@ -155,9 +171,8 @@ func enter(r *Room, client *Client) {
 		PieceCount: r.GameInstance.PieceCount,
 		Players:    players,
 	})
-	r.Broadcast(PlayerJoinedResponse{ClientID: client.ID})
-
-	r.GameInstance.Players = append(r.GameInstance.Players, PlayerState{Client: client})
+	r.Broadcast(PlayerJoinedResponse{ClientID: client.ID, Name: clientName})
+	r.GameInstance.Players = append(r.GameInstance.Players, PlayerState{Client: client, Name: clientName})
 	client.EnterRoom(r)
 }
 

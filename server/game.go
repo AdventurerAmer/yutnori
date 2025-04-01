@@ -71,6 +71,7 @@ const (
 
 type PlayerState struct {
 	Client  *Client
+	Name    string
 	IsReady bool
 	Pieces  [MaxPieceCountInRoom]Piece
 }
@@ -419,6 +420,24 @@ func (e EndMoveGameAction) Execute(c *Client, r *Room) {
 			r.GameInstance.GameState = GameStateSelectingMove
 		}
 	}
+}
+
+type ChangeNameGameAction struct {
+	Name string `json:"name"`
+}
+
+func (cn ChangeNameGameAction) Execute(c *Client, r *Room) {
+	for _, p := range r.GameInstance.Players {
+		if p.Client == c {
+			p.Name = cn.Name
+			err := r.Broadcast(ChangeNameResponse{Player: c.ID, Name: cn.Name})
+			if err != nil {
+				log.Println(err)
+			}
+			break
+		}
+	}
+	log.Println("broadcasting...", cn.Name)
 }
 
 func getNextCell(id CellID, AtStartPosition bool) (CellID, bool) {

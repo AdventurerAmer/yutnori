@@ -113,7 +113,15 @@ func (c *Client) WriteLoop(hub *Hub) {
 func handleMessage(c *Client, hub *Hub, msg Message) {
 	switch msg.Kind {
 	case MessageTypeCreateRoom:
-		hub.CreateRoom(c)
+		req := struct {
+			Name string `json:"name"`
+		}{}
+		err := json.Unmarshal(msg.Payload, &req)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		hub.CreateRoom(c, req.Name)
 	case MessageTypeExitRoom:
 		room := getRoom(c)
 		if room == nil {
@@ -145,13 +153,15 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 	case MessageTypeEnterRoom:
 		req := struct {
 			RoomID RoomID `json:"room_id"`
+			Name   string `json:"name"`
 		}{}
 		err := json.Unmarshal(msg.Payload, &req)
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		hub.EnterRoom(c, req.RoomID)
+		hub.EnterRoom(c, req.Name, req.RoomID)
+		log.Println("player joined", req)
 	case MessageTypePlayerReady:
 		req := struct {
 			IsReady bool `json:"is_ready"`
@@ -239,6 +249,21 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 				Piece: req.Piece,
 			},
 		})
+	case MessageTypeChangeName:
+		req := struct {
+			Name string `json:"name"`
+		}{}
+		err := json.Unmarshal(msg.Payload, &req)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		room := getRoom(c)
+		if room == nil {
+			break
+		}
+		room.ExecuteGameAction(c, ChangeNameGameAction{Name: req.Name})
+		log.Println(req)
 	}
 }
 

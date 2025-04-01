@@ -33,6 +33,7 @@ const (
 	MessageTypeBeginMove
 	MessageTypeEndMove
 	MessageTypeEndGame
+	MessageTypeChangeName
 )
 
 type Message struct {
@@ -82,6 +83,7 @@ func (c PlayerLeftResponse) Kind() MessageType {
 type PlayerRoomStateRespone struct {
 	ClientID ClientID `json:"client_id"`
 	IsReady  bool     `json:"is_ready"`
+	Name     string   `json:"name"`
 }
 
 type JoinRoomResponse struct {
@@ -98,6 +100,7 @@ func (j JoinRoomResponse) Kind() MessageType {
 
 type PlayerJoinedResponse struct {
 	ClientID ClientID `json:"client_id"`
+	Name     string   `json:"name"`
 }
 
 func (j PlayerJoinedResponse) Kind() MessageType {
@@ -175,6 +178,15 @@ type EndGameResponse struct {
 
 func (b EndGameResponse) Kind() MessageType {
 	return MessageTypeEndGame
+}
+
+type ChangeNameResponse struct {
+	Player ClientID `json:"player"`
+	Name   string   `json:"name"`
+}
+
+func (c ChangeNameResponse) Kind() MessageType {
+	return MessageTypeChangeName
 }
 
 func ReadMessage(conn net.Conn) (Message, error) {
