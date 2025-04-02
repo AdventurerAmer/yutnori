@@ -140,7 +140,7 @@ func (g *GameInstance) Start(room *Room) {
 	if err != nil {
 		log.Println(err)
 	}
-	g.Players[g.PlayerTurnIdx].Client.Send(CallRollResponse{})
+	room.Broadcast(CallRollResponse{Player: g.Players[g.PlayerTurnIdx].Client.ID})
 	g.GameState = GameStateCanRoll
 }
 
@@ -219,7 +219,7 @@ func (b BeginRollGameAction) Execute(c *Client, r *Room) {
 		log.Println(err)
 	}
 	if n == 4 || n == 5 {
-		c.Send(CallRollResponse{})
+		r.Broadcast(CallRollResponse{Player: player.Client.ID})
 		instance.GameState = GameStateCanRoll
 	} else if len(instance.Rolls) == 0 {
 		instance.PlayerTurnIdx += 1
@@ -232,10 +232,10 @@ func (b BeginRollGameAction) Execute(c *Client, r *Room) {
 		if err != nil {
 			log.Println(err)
 		}
-		instance.Players[instance.PlayerTurnIdx].Client.Send(CallRollResponse{})
+		r.Broadcast(CallRollResponse{Player: instance.Players[instance.PlayerTurnIdx].Client.ID})
 		instance.GameState = GameStateCanRoll
 	} else {
-		c.Send(SelectingMoveResponse{})
+		r.Broadcast(SelectingMoveResponse{Player: player.Client.ID})
 		if err != nil {
 			log.Println(err)
 		}
@@ -302,6 +302,7 @@ func (b BeginMoveGameAction) Execute(c *Client, r *Room) {
 	instance.CurrentMove = b.Move
 	instance.CurrentMoveFinishes = finished
 	err := r.Broadcast(BeginMoveRespone{
+		Player:     currentPlayer.Client.ID,
 		ShouldMove: true,
 		Roll:       b.Roll,
 		Cell:       b.Cell,
@@ -400,7 +401,7 @@ func (e EndMoveGameAction) Execute(c *Client, r *Room) {
 		}
 	} else {
 		if stomped {
-			currentPlayer.Client.Send(CallRollResponse{})
+			r.Broadcast(CallRollResponse{Player: currentPlayer.Client.ID})
 			r.GameInstance.GameState = GameStateCanRoll
 		} else if len(r.GameInstance.Rolls) == 0 {
 			r.GameInstance.PlayerTurnIdx += 1
@@ -416,7 +417,7 @@ func (e EndMoveGameAction) Execute(c *Client, r *Room) {
 			r.GameInstance.Players[r.GameInstance.PlayerTurnIdx].Client.Send(CallRollResponse{})
 			r.GameInstance.GameState = GameStateCanRoll
 		} else {
-			currentPlayer.Client.Send(SelectingMoveResponse{})
+			r.Broadcast(SelectingMoveResponse{Player: currentPlayer.Client.ID})
 			r.GameInstance.GameState = GameStateSelectingMove
 		}
 	}

@@ -131,7 +131,9 @@ func (b BeginTurnResponse) Kind() MessageType {
 	return MessageTypeBeginTurn
 }
 
-type CallRollResponse struct{}
+type CallRollResponse struct {
+	Player ClientID `json:"player"`
+}
 
 func (c CallRollResponse) Kind() MessageType {
 	return MessageTypeCanRoll
@@ -154,18 +156,21 @@ func (e EndTurnResponse) Kind() MessageType {
 	return MessageTypeEndTurn
 }
 
-type SelectingMoveResponse struct{}
+type SelectingMoveResponse struct {
+	Player ClientID `json:"player"`
+}
 
 func (s SelectingMoveResponse) Kind() MessageType {
 	return MessageTypeSelectingMove
 }
 
 type BeginMoveRespone struct {
-	ShouldMove bool   `json:"should_move"`
-	Roll       int    `json:"roll"`
-	Cell       CellID `json:"cell"`
-	Piece      int    `json:"piece"`
-	Finished   bool   `json:"finished"`
+	Player     ClientID `json:"player"`
+	ShouldMove bool     `json:"should_move"`
+	Roll       int      `json:"roll"`
+	Cell       CellID   `json:"cell"`
+	Piece      int      `json:"piece"`
+	Finished   bool     `json:"finished"`
 }
 
 func (b BeginMoveRespone) Kind() MessageType {

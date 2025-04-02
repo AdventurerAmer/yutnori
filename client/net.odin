@@ -181,9 +181,16 @@ End_Turn_Response :: struct {
 	next_player: string `json:"next_player"`,
 }
 
-Selecting_Move_Response :: struct {}
+Can_Roll_Response :: struct {
+	player: string `json:"player"`,
+}
+
+Selecting_Move_Response :: struct {
+	player: string `json:"player"`,
+}
 
 Begin_Move_Response :: struct {
+	player:      string `json:"player"`,
 	should_move: bool `json:"should_move"`,
 	roll:        int `json:"roll"`,
 	cell:        Cell_ID `json:"cell"`,
@@ -633,18 +640,16 @@ net_start_game :: proc(game_state: ^Game_State) {
 }
 
 net_roll :: proc(game_state: ^Game_State) {
-	if !game_state.connected || game_state.room_id == "" || game_state.current_action != .CanRoll {
+	if !game_state.connected || game_state.room_id == "" || game_state.action != .CanRoll {
 		return
 	}
 	game_state.is_trying_to_roll = true
 	push_net_request(game_state, Begin_Roll_Request{})
-	game_state.current_action = .BeginRoll
+	game_state.action = .BeginRoll
 }
 
 net_begin_move :: proc(game_state: ^Game_State, piece_idx: int, move: Move) {
-	if !game_state.connected ||
-	   game_state.room_id == "" ||
-	   game_state.current_action != .SelectingMove {
+	if !game_state.connected || game_state.room_id == "" || game_state.action != .SelectingMove {
 		return
 	}
 	push_net_request(
@@ -655,23 +660,23 @@ net_begin_move :: proc(game_state: ^Game_State, piece_idx: int, move: Move) {
 			cell = auto_cast move.cell,
 		},
 	)
-	game_state.current_action = .Waiting
+	game_state.action = .Waiting
 }
 
 net_end_target_move :: proc(game_state: ^Game_State) {
-	if !game_state.connected || game_state.room_id == "" || game_state.current_action != .OnMove {
+	if !game_state.connected || game_state.room_id == "" || game_state.action != .OnMove {
 		return
 	}
 	apply_move(game_state, game_state.target_move)
 	push_net_request(
 		game_state,
 		End_Move_Request {
-			piece = auto_cast game_state.target_piece,
+			piece = auto_cast game_state.target_piece_idx,
 			roll = auto_cast game_state.target_move.roll,
 			cell = auto_cast game_state.target_move.cell,
 		},
 	)
-	game_state.current_action = .Waiting
+	game_state.action = .Waiting
 }
 
 net_change_name :: proc(game_state: ^Game_State) {
@@ -683,4 +688,320 @@ net_change_name :: proc(game_state: ^Game_State) {
 	name := strings.clone(game_state.players[0].name, net_state.allocator)
 	sync.unlock(&net_state.allocator_mu)
 	push_net_request(game_state, Change_Name_Request{name})
+}
+
+
+handle_net_responses :: proc(game_state: ^Game_State) {
+	if game_state.net_sender_thread == nil do return
+	net_state := &game_state.net_state
+	sync.lock(&game_state.net_response_queue_mutex)
+	if queue.len(game_state.net_response_queue) == 0 {
+		sync.unlock(&game_state.net_response_queue_mutex)
+		return
+	}
+	msg := queue.pop_front(&game_state.net_response_queue)
+	sync.unlock(&game_state.net_response_queue_mutex)
+	defer {
+		sync.lock(&net_state.allocator_mu)
+		delete(msg.payload, net_state.allocator)
+		sync.unlock(&net_state.allocator_mu)
+	}
+	switch msg.kind {
+	case .Keepalive:
+	case .Connect:
+		game_state.is_trying_to_connect = false
+		resp := Connect_Response{}
+		parse_msg(msg, &resp)
+		if resp.client_id != "" {
+			game_state.connected = true
+			game_state.players[0].client_id = strings.clone(resp.client_id)
+		}
+	case .Disconnect:
+		resp := Disconnect_Response{}
+		parse_msg(msg, &resp)
+		if game_state.connected {
+			game_state.connected = false
+			game_state.game_mode = .Local
+			reset_net_state(game_state)
+			reset_game_state(game_state)
+			game_state.screen_state = .MainMenu
+		}
+	case .Quit:
+	case .CreateRoom:
+		game_state.is_trying_to_create_room = false
+		resp := Create_Room_Response{}
+		parse_msg(msg, &resp)
+		if resp.room_id != "" {
+			game_state.is_room_master = true
+			game_state.room_piece_count = 2
+			game_state.room_player_count = 1
+			game_state.room_ready_player_count = 0
+			game_state.screen_state = .Room
+			game_state.room_id = strings.clone(resp.room_id)
+		}
+	case .ExitRoom:
+		game_state.is_trying_to_exit_room = false
+		resp := Exit_Room_Response{}
+		parse_msg(msg, &resp)
+		if resp.exit {
+			reset_room_state(game_state)
+			if game_state.screen_state == .Room {
+				game_state.screen_state = .MultiplayerGameMode
+			}
+		}
+	case .SetPieceCount:
+		game_state.is_trying_to_set_piece_count = false
+		resp := Set_Piece_Count_Response{}
+		parse_msg(msg, &resp)
+		if resp.should_set {
+			game_state.room_piece_count = resp.piece_count
+		}
+	case .PlayerLeft:
+		resp := Player_Left_Response{}
+		parse_msg(msg, &resp)
+		fmt.println(resp, game_state.players[0].client_id)
+		game_state.is_room_master = game_state.players[0].client_id == resp.master
+		for i in 0 ..< int(game_state.room_player_count) {
+			if game_state.players[i].client_id == resp.player {
+				if i == 0 {
+					reset_room_state(game_state)
+					if game_state.screen_state == .Room {
+						game_state.screen_state = .MultiplayerGameMode
+					}
+				} else {
+					if resp.kicked {
+						game_state.is_trying_to_kick_player_set -= {i}
+					}
+					delete(game_state.players[i].client_id)
+					game_state.players[i].client_id = ""
+					game_state.players[i] = game_state.players[game_state.room_player_count - 1]
+					game_state.players[i].is_ready = false
+					game_state.room_player_count -= 1
+
+					if game_state.screen_state == .GamePlay {
+						reset_game_state(game_state)
+						game_state.screen_state = .Room
+					}
+				}
+				break
+			}
+		}
+	case .EnterRoom:
+		resp := Join_Room_Response{}
+		parse_msg(msg, &resp)
+		game_state.is_trying_to_join_room = false
+		if resp.join {
+			game_state.is_room_master = resp.master == game_state.players[0].client_id
+			game_state.room_piece_count = i32(resp.piece_count)
+			game_state.room_ready_player_count = 0
+			game_state.room_player_count = 1
+			for p in resp.players {
+				if p.is_ready do game_state.room_ready_player_count += 1
+				idx := game_state.room_player_count
+				game_state.players[idx].client_id = strings.clone(p.client_id)
+				game_state.players[idx].name = strings.clone(p.name)
+				game_state.room_player_count += 1
+			}
+			game_state.screen_state = .Room
+			game_state.room_id = strings.clone(resp.room_id)
+		}
+	case .PlayerJoined:
+		resp := Player_Joined_Response{}
+		parse_msg(msg, &resp)
+		if resp.client_id != game_state.players[0].client_id {
+			game_state.players[game_state.room_player_count].client_id = strings.clone(
+				resp.client_id,
+			)
+			game_state.players[game_state.room_player_count].name = strings.clone(resp.name)
+		}
+		game_state.room_player_count += 1
+	case .KickPlayer:
+	case .Ready:
+		resp := Player_Ready_Response{}
+		parse_msg(msg, &resp)
+
+		for i in 0 ..< MAX_PLAYER_COUNT {
+			if game_state.players[i].client_id == resp.player {
+				if i == 0 {
+					game_state.is_trying_to_change_ready_state = false
+				}
+				game_state.players[i].is_ready = resp.is_ready
+				break
+			}
+		}
+		if resp.is_ready {
+			game_state.room_ready_player_count += 1
+		} else {
+			game_state.room_ready_player_count -= 1
+		}
+	case .StartGame:
+		game_state.is_trying_to_start_game = false
+		resp := Start_Game_Response{}
+		parse_msg(msg, &resp)
+		if resp.should_start {
+			game_state.player_count = game_state.room_player_count
+			for i in 0 ..< game_state.player_count {
+				if game_state.players[i].client_id == resp.starting_player {
+					game_state.player_turn_index = i
+					break
+				}
+			}
+			game_state.screen_state = .GamePlay
+			game_state.action = .GameStarted
+		}
+	case .BeginTurn:
+		log(
+			game_state,
+			fmt.tprintf("%s's turn", game_state.players[game_state.player_turn_index].name),
+		)
+		game_state.action = .BeginTurn
+	case .CanRoll:
+		resp := Can_Roll_Response{}
+		parse_msg(msg, &resp)
+		if game_state.players[0].client_id == resp.player {
+			game_state.action = .CanRoll
+		}
+		log(
+			game_state,
+			fmt.tprintf("%s can roll", game_state.players[game_state.player_turn_index].name),
+		)
+	case .BeginRoll:
+		log(
+			game_state,
+			fmt.tprintf("%s is rolling", game_state.players[game_state.player_turn_index].name),
+		)
+	case .EndRoll:
+		game_state.is_trying_to_roll = false
+		resp := End_Roll_Response{}
+		parse_msg(msg, &resp)
+		if resp.should_append {
+			append(&game_state.rolls, i32(resp.roll))
+		}
+		log(
+			game_state,
+			fmt.tprintf(
+				"%s rolled %d",
+				game_state.players[game_state.player_turn_index].name,
+				resp.roll,
+			),
+		)
+	case .EndTurn:
+		log(game_state, "turn ended")
+		resp := End_Turn_Response{}
+		parse_msg(msg, &resp)
+		for idx in 0 ..< game_state.player_count {
+			if game_state.players[idx].client_id == resp.next_player {
+				game_state.player_turn_index = idx
+				break
+			}
+		}
+		resize(&game_state.rolls, 0)
+		game_state.action = .EndTurn
+	case .SelectingMove:
+		resp := Selecting_Move_Response{}
+		parse_msg(msg, &resp)
+		if resp.player == game_state.players[0].client_id {
+			game_state.action = .SelectingMove
+		}
+		log(
+			game_state,
+			fmt.tprintf(
+				"%s is selecting a move",
+				game_state.players[game_state.player_turn_index].name,
+			),
+		)
+	case .BeginMove:
+		resp := Begin_Move_Response{}
+		parse_msg(msg, &resp)
+
+		if resp.should_move {
+			game_state.target_piece_idx = auto_cast resp.piece
+			game_state.target_move = Move {
+				roll   = auto_cast resp.roll,
+				cell   = resp.cell,
+				finish = resp.finished,
+			}
+			game_state.move_seq_idx = -1
+			game_state.target_piece_position_percent = 0
+			game_state.action = .OnMove
+		}
+
+		log(
+			game_state,
+			fmt.tprintf(
+				"%s is moving piece (%d) to cell (%v) consuming roll (%d)",
+				game_state.players[game_state.player_turn_index].name,
+				game_state.target_piece_idx + 1,
+				resp.cell,
+				resp.roll,
+			),
+		)
+	case .EndMove:
+	case .EndGame:
+		resp := End_Game_Response{}
+		parse_msg(msg, &resp)
+		player_won_index := i32(-1)
+		for i in 0 ..< game_state.player_count {
+			if game_state.players[i].client_id == resp.winner {
+				player_won_index = i
+				break
+			}
+		}
+		assert(player_won_index == game_state.player_turn_index)
+		end_game(game_state)
+	case .ChangeName:
+		resp := Change_Name_Response{}
+		parse_msg(msg, &resp)
+		fmt.println(resp)
+		for i in 1 ..< game_state.player_count {
+			if game_state.players[i].client_id == resp.player {
+				if game_state.players[i].name != "" {
+					delete(game_state.players[i].name)
+					game_state.players[i].name = ""
+				}
+				game_state.players[i].name = strings.clone(resp.name)
+				break
+			}
+		}
+	}
+}
+
+reset_net_state :: proc(game_state: ^Game_State) {
+	delete(game_state.players[0].client_id)
+	game_state.players[0].client_id = ""
+	game_state.players[0].is_ready = false
+	reset_room_state(game_state)
+}
+
+reset_room_state :: proc(game_state: ^Game_State) {
+	for i in 1 ..< MAX_PLAYER_COUNT {
+		game_state.players[i].is_ready = false
+
+		if game_state.players[i].client_id != "" {
+			delete(game_state.players[i].client_id)
+			game_state.players[i].client_id = ""
+		}
+
+		if game_state.players[i].name != "" {
+			delete(game_state.players[i].name)
+			game_state.players[i].name = ""
+		}
+	}
+
+	delete(game_state.room_id)
+	game_state.room_id = ""
+
+	game_state.is_room_master = false
+	game_state.room_player_count = 0
+	game_state.room_ready_player_count = 0
+	game_state.room_piece_count = 2
+	game_state.is_trying_to_connect = false
+	game_state.is_trying_to_kick_player_set = {}
+	game_state.is_trying_to_change_ready_state = false
+	game_state.is_trying_to_create_room = false
+	game_state.is_trying_to_join_room = false
+	game_state.is_trying_to_exit_room = false
+	game_state.is_trying_to_set_piece_count = false
+	game_state.is_trying_to_start_game = false
+	game_state.is_trying_to_roll = false
 }

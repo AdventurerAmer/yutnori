@@ -127,3 +127,8 @@ get_widget :: proc(layout: UI_Vertical_Layout, widget_id: int) -> UI_Widget {
 	assert(widget_id < len(layout._widgets))
 	return layout._widgets[widget_id]
 }
+
+set_ui_style :: proc(style: UI_Style) {
+	rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SIZE), i32(style.font_size))
+	rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SPACING), i32(style.font_spacing))
+}

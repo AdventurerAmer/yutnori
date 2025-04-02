@@ -35,14 +35,6 @@ Piece :: struct {
 	cell:     Cell_ID,
 }
 
-Player_State :: struct {
-	name:      string,
-	client_id: string,
-	is_ready:  bool,
-	color:     rl.Color,
-	pieces:    [MAX_PIECE_COUNT]Piece,
-}
-
 Move :: struct {
 	roll:   i32,
 	cell:   Cell_ID,
@@ -63,8 +55,8 @@ Draw_State :: struct {
 
 Action :: enum {
 	None,
-	GameStarted,
 	GameEnded,
+	GameStarted,
 	BeginTurn,
 	EndTurn,
 	CanRoll,
@@ -73,6 +65,14 @@ Action :: enum {
 	Waiting,
 	OnMove,
 	SelectingMove,
+}
+
+Player_State :: struct {
+	name:      string,
+	color:     rl.Color,
+	pieces:    [MAX_PIECE_COUNT]Piece,
+	client_id: string,
+	is_ready:  bool,
 }
 
 Game_Mode :: enum {
@@ -85,20 +85,20 @@ Game_State :: struct {
 	screen_state:                    Screen_State,
 	is_paused:                       bool,
 	draw_state:                      Draw_State,
+	game_mode:                       Game_Mode,
 	piece_count:                     i32,
 	player_count:                    i32,
-	players:                         [dynamic]Player_State,
+	players:                         [MAX_PLAYER_COUNT]Player_State,
 	player_turn_index:               i32,
 	player_won_index:                i32,
 	rolls:                           [dynamic]i32,
 	selected_piece_index:            i32,
-	current_action:                  Action,
+	action:                          Action,
 	target_move:                     Move,
-	target_piece:                    i32,
-	target_position:                 Vec2,
-	target_position_percent:         f32,
+	target_piece_idx:                i32,
+	target_piece_position:           Vec2,
+	target_piece_position_percent:   f32,
 	move_seq_idx:                    i32,
-	game_mode:                       Game_Mode,
 	net_sender_thread:               ^thread.Thread,
 	net_receiver_thread:             ^thread.Thread,
 	net_commands_queue:              queue.Queue(Net_Request),
@@ -123,6 +123,7 @@ Game_State :: struct {
 	is_trying_to_start_game:         bool,
 	is_trying_to_roll:               bool,
 	net_state:                       Net_State,
+	log:                             queue.Queue(string),
 }
 
 init_game :: proc(allocator := context.allocator) -> ^Game_State {
@@ -134,13 +135,12 @@ init_game :: proc(allocator := context.allocator) -> ^Game_State {
 }
 
 deinit_game :: proc(game_state: ^Game_State) {
+	reset_game_state(game_state)
 	reset_net_state(game_state)
-	delete(game_state.rolls)
 	if game_state.players[0].name != "" {
 		delete(game_state.players[0].name)
 		game_state.players[0].name = ""
 	}
-	delete(game_state.players)
 	if game_state.net_sender_thread != nil {
 		push_net_request(game_state, Quit_Request{})
 		thread.join(game_state.net_sender_thread)
@@ -154,11 +154,18 @@ deinit_game :: proc(game_state: ^Game_State) {
 		delete(net_state.allocator_data)
 		free(net_state.allocator.data)
 	}
+	delete(game_state.rolls)
+	queue.destroy(&game_state.log)
 	free(game_state)
 }
 
 close_game :: proc(game_state: ^Game_State) {
 	game_state.running = false
+}
+
+log :: proc(game_state: ^Game_State, s: string) {
+	queue.push_front(&game_state.log, strings.clone(s))
+	fmt.println(s)
 }
 
 PLAYER_COLORS := [MAX_PLAYER_COUNT]rl.Color {
@@ -175,47 +182,60 @@ reset_game_state :: proc(game_state: ^Game_State) {
 	game_state.piece_count = MIN_PIECE_COUNT
 	game_state.player_turn_index = 0
 	game_state.player_won_index = -1
-	resize(&game_state.players, MAX_PLAYER_COUNT)
 	for i in 0 ..< MAX_PLAYER_COUNT {
-		p := &game_state.players[i]
-		p.color = PLAYER_COLORS[i]
-		p.is_ready = false
+		player := &game_state.players[i]
+		player.color = PLAYER_COLORS[i]
+		player.is_ready = false
 		for j in 0 ..< MAX_PIECE_COUNT {
-			piece := Piece {
+			player.pieces[j] = Piece {
 				at_start = true,
 				finished = false,
 				cell     = .BottomRightCorner,
 			}
-			p.pieces[j] = piece
 		}
 	}
 	clear(&game_state.rolls)
 	game_state.is_paused = false
 	game_state.room_ready_player_count = 0
 	game_state.selected_piece_index = -1
-	game_state.current_action = .None
+	game_state.action = .None
+	for i in 0 ..< game_state.log.len {
+		delete(queue.get(&game_state.log, i))
+	}
+	queue.clear(&game_state.log)
 }
 
 start_game :: proc(game_state: ^Game_State) {
 	game_state.player_turn_index = rand.int31_max(game_state.player_count)
-	game_state.current_action = .GameStarted
+	game_state.action = .GameStarted
+	log(game_state, "game started")
 }
 
 end_game :: proc(game_state: ^Game_State) {
 	game_state.player_won_index = game_state.player_turn_index
-	game_state.current_action = .GameEnded
+	game_state.action = .GameEnded
+	if game_state.game_mode == .Local {
+		log(game_state, fmt.tprintf("game ended P%d won", game_state.player_won_index + 1))
+	} else {
+		log(
+			game_state,
+			fmt.tprintf("game ended %s won", game_state.players[game_state.player_won_index].name),
+		)
+	}
 }
 
 begin_turn :: proc(game_state: ^Game_State) {
-	if game_state.current_action == .GameStarted || game_state.current_action == .EndTurn {
-		game_state.current_action = .BeginTurn
+	if game_state.action == .GameStarted || game_state.action == .EndTurn {
+		game_state.action = .BeginTurn
 	}
+	log(game_state, fmt.tprintf("P%d's turn", game_state.player_turn_index + 1))
 }
 
 end_turn :: proc(game_state: ^Game_State) {
 	game_state.player_turn_index += 1
 	game_state.player_turn_index %= game_state.player_count
-	game_state.current_action = .BeginTurn
+	game_state.action = .EndTurn
+	log(game_state, "turn ended")
 }
 
 roll :: proc(game_state: ^Game_State) -> i32 {
@@ -243,25 +263,32 @@ roll :: proc(game_state: ^Game_State) -> i32 {
 }
 
 can_roll :: proc(game_state: ^Game_State) {
-	game_state.current_action = .CanRoll
+	game_state.action = .CanRoll
+	log(game_state, fmt.tprintf("P%d can roll", game_state.player_turn_index + 1))
+}
+
+can_select_move :: proc(game_state: ^Game_State) {
+	game_state.action = .SelectingMove
+	log(game_state, fmt.tprintf("P%d is selecting a move", game_state.player_turn_index + 1))
 }
 
 begin_roll :: proc(game_state: ^Game_State) {
-	game_state.current_action = .BeginRoll
+	game_state.action = .BeginRoll
+	log(game_state, fmt.tprintf("P%d is rolling", game_state.player_turn_index + 1))
 }
 
 end_roll :: proc(game_state: ^Game_State) {
 	n := roll(game_state)
-	game_state.current_action = .EndRoll
-	fmt.printf("roll was: %d\n", n)
+	game_state.action = .EndRoll
+	log(game_state, fmt.tprintf("P%d rolled %d", game_state.player_turn_index + 1, n))
 }
 
 on_move :: proc(game_state: ^Game_State) -> bool {
 	draw_state := game_state.draw_state
 	player := &game_state.players[game_state.player_turn_index]
-	piece := player.pieces[game_state.target_piece]
+	target_piece := player.pieces[game_state.target_piece_idx]
 	move := game_state.target_move
-	seq0, seq1, won := get_move_sequance(piece, move.roll)
+	seq0, seq1, won := get_move_sequance(target_piece, move.roll)
 	seq := seq0
 	if len(seq1) != 0 {
 		if move.cell == seq1[len(seq1) - 1] {
@@ -274,7 +301,7 @@ on_move :: proc(game_state: ^Game_State) -> bool {
 	dt := rl.GetFrameTime()
 	from := Vec2{}
 	if game_state.move_seq_idx == -1 {
-		from = draw_state.cell_positions[piece.cell]
+		from = draw_state.cell_positions[target_piece.cell]
 	} else {
 		from = draw_state.cell_positions[seq[game_state.move_seq_idx]]
 	}
@@ -284,15 +311,19 @@ on_move :: proc(game_state: ^Game_State) -> bool {
 	ease_in_out_quint :: proc(x: f32) -> f32 {
 		return x < 0.5 ? 16 * x * x * x * x * x : 1 - math.pow(-2 * x + 2, 5) / 2
 	}
-	game_state.target_position = math.lerp(
+	game_state.target_piece_position = math.lerp(
 		from,
 		to,
-		ease_in_out_quint(game_state.target_position_percent),
+		ease_in_out_quint(game_state.target_piece_position_percent),
 	)
-	game_state.target_position_percent += dt * 3
-	game_state.target_position_percent = math.clamp(game_state.target_position_percent, 0.0, 1.0)
-	if game_state.target_position_percent >= 0.99 {
-		game_state.target_position_percent = 0.0
+	game_state.target_piece_position_percent += dt * 3
+	game_state.target_piece_position_percent = math.clamp(
+		game_state.target_piece_position_percent,
+		0.0,
+		1.0,
+	)
+	if game_state.target_piece_position_percent >= 0.99 {
+		game_state.target_piece_position_percent = 0.0
 		game_state.move_seq_idx += 1
 	}
 	return false
@@ -300,23 +331,19 @@ on_move :: proc(game_state: ^Game_State) -> bool {
 
 apply_move :: proc(game_state: ^Game_State, move: Move) -> (stomped: bool) {
 	current_player := &game_state.players[game_state.player_turn_index]
-	piece_to_move := current_player.pieces[game_state.target_piece]
-
-	// moving pieces
+	piece_to_move := &current_player.pieces[game_state.target_piece_idx]
 	if piece_to_move.at_start {
 		piece_to_move.finished = move.finish
 		piece_to_move.cell = move.cell
 		piece_to_move.at_start = false
-		current_player.pieces[game_state.target_piece] = piece_to_move
 	} else {
 		for piece_idx in 0 ..< game_state.piece_count {
-			piece := current_player.pieces[piece_idx]
+			piece := &current_player.pieces[piece_idx]
 			if piece.finished do continue
 			if piece.cell == piece_to_move.cell && !piece.at_start {
 				piece.cell = move.cell
 				piece.finished = move.finish
 			}
-			current_player.pieces[piece_idx] = piece
 		}
 	}
 
@@ -324,7 +351,7 @@ apply_move :: proc(game_state: ^Game_State, move: Move) -> (stomped: bool) {
 	for player_idx in 0 ..< game_state.player_count {
 		player := &game_state.players[player_idx]
 		for piece_idx in 0 ..< game_state.piece_count {
-			piece := player.pieces[piece_idx]
+			piece := &player.pieces[piece_idx]
 			if piece.finished do continue
 			if piece.cell == move.cell &&
 			   !piece.at_start &&
@@ -333,7 +360,6 @@ apply_move :: proc(game_state: ^Game_State, move: Move) -> (stomped: bool) {
 				piece.at_start = true
 				stomped = true
 			}
-			player.pieces[piece_idx] = piece
 		}
 	}
 
@@ -364,22 +390,32 @@ end_target_move :: proc(game_state: ^Game_State) {
 		end_game(game_state)
 	} else {
 		if stomped {
-			game_state.current_action = .CanRoll
+			can_roll(game_state)
 		} else if len(game_state.rolls) != 0 {
-			game_state.current_action = .SelectingMove
+			can_select_move(game_state)
 		} else {
-			game_state.current_action = .EndTurn
+			end_turn(game_state)
 		}
 	}
 }
 
 attempt_move :: proc(game_state: ^Game_State, move: Move) {
-	game_state.target_piece = game_state.selected_piece_index
+	game_state.target_piece_idx = game_state.selected_piece_index
 	game_state.target_move = move
 	game_state.move_seq_idx = -1
-	game_state.target_position_percent = 0
-	game_state.current_action = .OnMove
+	game_state.target_piece_position_percent = 0
+	game_state.action = .OnMove
 	game_state.selected_piece_index = -1
+	log(
+		game_state,
+		fmt.tprintf(
+			"P%d is moving piece (%d) to cell (%v) consuming roll (%d)",
+			game_state.player_turn_index + 1,
+			game_state.target_piece_idx + 1,
+			move.cell,
+			move.roll,
+		),
+	)
 }
 
 net_attempt_move :: proc(game_state: ^Game_State, move: Move) {
@@ -553,12 +589,8 @@ main :: proc() {
 		font_size    = f32(30),
 		font_spacing = f32(2),
 	}
-	rl.GuiSetStyle(.DEFAULT, i32(rl.GuiDefaultProperty.TEXT_SIZE), i32(default_style.font_size))
-	rl.GuiSetStyle(
-		.DEFAULT,
-		i32(rl.GuiDefaultProperty.TEXT_SPACING),
-		i32(default_style.font_spacing),
-	)
+	set_ui_style(default_style)
+
 	for game_state.running {
 		free_all(context.temp_allocator)
 
@@ -613,7 +645,7 @@ main :: proc() {
 			piece_size := draw_state.piece_size
 
 			if game_state.game_mode == .Online {
-				switch game_state.current_action {
+				switch game_state.action {
 				case .None:
 				case .GameStarted:
 				case .GameEnded:
@@ -638,30 +670,27 @@ main :: proc() {
 					}
 				}
 			} else {
-				switch game_state.current_action {
+				switch game_state.action {
 				case .None:
 				case .GameStarted:
-					fmt.println("game has started")
 					begin_turn(game_state)
 				case .GameEnded:
-					fmt.printf("game has ended P%d won\n", game_state.player_won_index + 1)
 				case .BeginTurn:
 					can_roll(game_state)
 				case .EndTurn:
-					end_turn(game_state)
+					begin_turn(game_state)
 				case .CanRoll:
 				case .BeginRoll:
 					end_roll(game_state)
 				case .EndRoll:
-					fmt.println("end roll")
 					roll_count := len(game_state.rolls)
 					if roll_count == 0 {
-						game_state.current_action = .EndTurn
+						end_turn(game_state)
 					} else if game_state.rolls[len(game_state.rolls) - 1] == 4 ||
 					   game_state.rolls[len(game_state.rolls) - 1] == 5 {
-						game_state.current_action = .CanRoll
+						can_roll(game_state)
 					} else {
-						game_state.current_action = .SelectingMove
+						can_select_move(game_state)
 					}
 				case .Waiting:
 				case .OnMove:
@@ -717,7 +746,7 @@ main :: proc() {
 				}
 			}
 
-			if game_state.current_action == .GameEnded {
+			if game_state.action == .GameEnded {
 				rl.DrawRectangleRec(screen_rect, {0, 0, 0, 128})
 
 				spacing := 0.005 * screen_size.y
@@ -770,25 +799,25 @@ update_draw_state :: proc(game_state: ^Game_State) {
 
 	{
 		padding := min(screen_size.x * 0.1, screen_size.y * 0.1)
-		size := Vec2{screen_size.x * 0.5, screen_size.y * 0.9}
+		size := Vec2{screen_size.x * 0.5, screen_size.y * 0.8}
 		board_rect := Rect{screen_size.x * 0.5 - size.x * 0.5, screen_size.y * 0.1, size.x, size.y}
 		board_rect = shrink_rect(board_rect, padding)
 		draw_state.board_rect = board_rect
 	}
 
-	draw_state.bottom_rect = Rect{screen_size.y * 0.9, 0, screen_size.x, screen_size.y * 0.1}
+	draw_state.bottom_rect = Rect{0, screen_size.y * 0.9, screen_size.x, screen_size.y * 0.1}
 
 	draw_state.left_players_rect = Rect {
 		0,
 		screen_size.y * 0.1,
 		screen_size.x * 0.25,
-		screen_size.y * 0.9,
+		screen_size.y * 0.8,
 	}
 	draw_state.right_players_rect = Rect {
 		screen_size.x * 0.75,
 		screen_size.y * 0.1,
 		screen_size.x * 0.25,
-		screen_size.y * 0.9,
+		screen_size.y * 0.8,
 	}
 
 
@@ -915,70 +944,57 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 	{
 		cursor := Vec2{draw_state.top_rect.x, draw_state.top_rect.y}
 
+		cursor.y += 0.005 * screen_size.y
+
 		{
-			text := cstring("ROLL")
+			text := cstring("ROLLS")
 			size := rl.MeasureTextEx(style.font, text, style.font_size, style.font_spacing)
-			size += screen_size * Vec2{0.01, 0.01}
-
-			cursor.y += screen_size.y * 0.01
-			r := Rect{screen_size.x * 0.5 - size.x * 0.5, cursor.y, size.x, size.y}
-
-			if game_state.current_action != .CanRoll ||
-			   game_state.is_paused ||
-			   game_state.is_trying_to_roll {
-				rl.GuiDisable()
-			}
-
-			if rl.GuiButton(r, text) {
-				if game_state.game_mode == .Online {
-					net_roll(game_state)
-				} else {
-					begin_roll(game_state)
-				}
-			}
-
-			rl.GuiEnable()
-
+			rl.DrawTextEx(
+				style.font,
+				text,
+				{screen_size.x * 0.5 - size.x * 0.5, cursor.y},
+				style.font_size,
+				style.font_spacing,
+				rl.WHITE,
+			)
 			cursor.y += size.y
 		}
 
-		{
-			total_width := f32(0)
-			total_height := f32(0)
-			font_size := style.font_size * 0.75
+		total_width := f32(0)
+		total_height := f32(0)
+		font_size := style.font_size * 0.75
 
-			for roll in game_state.rolls {
-				text := fmt.ctprintf("%d", roll)
-				size := rl.MeasureTextEx(style.font, text, font_size, style.font_spacing)
-				total_width += size.x
-				total_height = max(total_height, size.y)
-			}
+		for roll in game_state.rolls {
+			text := fmt.ctprintf("%d", roll)
+			size := rl.MeasureTextEx(style.font, text, font_size, style.font_spacing)
+			total_width += size.x
+			total_height = max(total_height, size.y)
+		}
 
-			spacing := 0.025 * screen_size.x
-			total_width += f32(len(game_state.rolls) - 1) * spacing
+		spacing := 0.025 * screen_size.x
+		total_width += f32(len(game_state.rolls) - 1) * spacing
 
-			cursor.x += draw_state.top_rect.width * 0.5 - total_width * 0.5
-			cursor.y += screen_size.y * 0.02
+		cursor.x += draw_state.top_rect.width * 0.5 - total_width * 0.5
+		cursor.y += screen_size.y * 0.01
 
-			for roll in game_state.rolls {
-				text := fmt.ctprintf("%d", roll)
-				size := rl.MeasureTextEx(style.font, text, font_size, style.font_spacing)
+		for roll in game_state.rolls {
+			text := fmt.ctprintf("%d", roll)
+			size := rl.MeasureTextEx(style.font, text, font_size, style.font_spacing)
 
-				r := Rect{cursor.x, cursor.y, size.x, total_height}
-				r = expand_rect(r, Vec2{0.01, 0.01} * screen_size)
+			r := Rect{cursor.x, cursor.y, size.x, total_height}
+			r = expand_rect(r, Vec2{0.01, 0.01} * screen_size)
 
-				rl.DrawRectangleRec(r, rl.Color{0, 0, 0, 128})
-				rl.DrawTextEx(
-					style.font,
-					text,
-					{cursor.x, cursor.y},
-					font_size,
-					style.font_spacing,
-					rl.WHITE,
-				)
+			rl.DrawRectangleRec(r, rl.Color{0, 0, 0, 128})
+			rl.DrawTextEx(
+				style.font,
+				text,
+				{cursor.x, cursor.y},
+				font_size,
+				style.font_spacing,
+				rl.WHITE,
+			)
 
-				cursor.x += size.x + spacing
-			}
+			cursor.x += size.x + spacing
 		}
 	}
 
@@ -1097,7 +1113,7 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 				if piece.finished do continue
 				hovered := rl.CheckCollisionPointRec(mouse, piece_rect)
 				is_selected := game_state.selected_piece_index == piece_idx
-				if game_state.current_action == .SelectingMove &&
+				if game_state.action == .SelectingMove &&
 				   hovered &&
 				   belongs_to_current_player &&
 				   len(game_state.rolls) != 0 &&
@@ -1107,11 +1123,11 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 					piece_rect = expand_rect(piece_rect, Vec2{padding, padding})
 				}
 
-				if game_state.current_action == .OnMove && belongs_to_current_player {
-					if piece_idx == game_state.target_piece ||
-					   (piece.cell == player.pieces[game_state.target_piece].cell &&
+				if game_state.action == .OnMove && belongs_to_current_player {
+					if piece_idx == game_state.target_piece_idx ||
+					   (piece.cell == player.pieces[game_state.target_piece_idx].cell &&
 							   piece.cell != .BottomRightCorner) {
-						pos := game_state.target_position
+						pos := game_state.target_piece_position
 						piece_rect.x = pos.x
 						piece_rect.y = pos.y
 					}
@@ -1224,286 +1240,56 @@ draw :: proc(game_state: ^Game_State, style: UI_Style) {
 			}
 		}
 	}
-}
 
-handle_net_responses :: proc(game_state: ^Game_State) {
-	if game_state.net_sender_thread == nil do return
-	net_state := &game_state.net_state
-	sync.lock(&game_state.net_response_queue_mutex)
-	if queue.len(game_state.net_response_queue) == 0 {
-		sync.unlock(&game_state.net_response_queue_mutex)
-		return
+	if game_state.action == .CanRoll && !game_state.is_paused {
+		rl.DrawRectangleRec({0, 0, screen_size.x, screen_size.y}, {0, 0, 0, 127})
+
+		text := cstring("ROLL")
+		size := rl.MeasureTextEx(style.font, text, style.font_size, style.font_spacing)
+		size += screen_size * Vec2{0.01, 0.01}
+
+		r := Rect {
+			screen_size.x * 0.5 - size.x * 0.5,
+			screen_size.y * 0.5 - size.y * 0.5,
+			size.x,
+			size.y,
+		}
+
+		if game_state.action != .CanRoll || game_state.is_paused || game_state.is_trying_to_roll {
+			rl.GuiDisable()
+		}
+
+		if rl.GuiButton(r, text) {
+			if game_state.game_mode == .Online {
+				net_roll(game_state)
+			} else {
+				begin_roll(game_state)
+			}
+		}
+
+		rl.GuiEnable()
 	}
-	msg := queue.pop_front(&game_state.net_response_queue)
-	sync.unlock(&game_state.net_response_queue_mutex)
-	defer {
-		sync.lock(&net_state.allocator_mu)
-		delete(msg.payload, net_state.allocator)
-		sync.unlock(&net_state.allocator_mu)
-	}
-	switch msg.kind {
-	case .Keepalive:
-		fmt.println("keepalive response")
-	case .Connect:
-		fmt.println("connect response")
-		game_state.is_trying_to_connect = false
-		resp := Connect_Response{}
-		parse_msg(msg, &resp)
-		if resp.client_id != "" {
-			game_state.connected = true
-			game_state.players[0].client_id = strings.clone(resp.client_id)
-		}
-	case .Disconnect:
-		fmt.println("disconnect response")
-		resp := Disconnect_Response{}
-		parse_msg(msg, &resp)
-		if game_state.connected {
-			game_state.connected = false
-			game_state.game_mode = .Local
-			reset_net_state(game_state)
-			reset_game_state(game_state)
-			game_state.screen_state = .MainMenu
-		}
-	case .Quit:
-	case .CreateRoom:
-		game_state.is_trying_to_create_room = false
-		resp := Create_Room_Response{}
-		parse_msg(msg, &resp)
-		if resp.room_id != "" {
-			game_state.is_room_master = true
-			game_state.room_piece_count = 2
-			game_state.room_player_count = 1
-			game_state.room_ready_player_count = 0
-			game_state.screen_state = .Room
-			game_state.room_id = strings.clone(resp.room_id)
-		}
-	case .ExitRoom:
-		game_state.is_trying_to_exit_room = false
-		resp := Exit_Room_Response{}
-		parse_msg(msg, &resp)
-		if resp.exit {
-			reset_room_state(game_state)
-			if game_state.screen_state == .Room {
-				game_state.screen_state = .MultiplayerGameMode
-			}
-		}
-	case .SetPieceCount:
-		game_state.is_trying_to_set_piece_count = false
-		resp := Set_Piece_Count_Response{}
-		parse_msg(msg, &resp)
-		if resp.should_set {
-			game_state.room_piece_count = resp.piece_count
-		}
-	case .PlayerLeft:
-		resp := Player_Left_Response{}
-		parse_msg(msg, &resp)
-		fmt.println(resp, game_state.players[0].client_id)
-		game_state.is_room_master = game_state.players[0].client_id == resp.master
-		for i in 0 ..< int(game_state.room_player_count) {
-			if game_state.players[i].client_id == resp.player {
-				if i == 0 {
-					reset_room_state(game_state)
-					if game_state.screen_state == .Room {
-						game_state.screen_state = .MultiplayerGameMode
-					}
-				} else {
-					if resp.kicked {
-						game_state.is_trying_to_kick_player_set -= {i}
-					}
-					delete(game_state.players[i].client_id)
-					game_state.players[i].client_id = ""
-					game_state.players[i] = game_state.players[game_state.room_player_count - 1]
-					game_state.players[i].is_ready = false
-					game_state.room_player_count -= 1
 
-					if game_state.screen_state == .GamePlay {
-						reset_game_state(game_state)
-						game_state.screen_state = .Room
-					}
-				}
-				break
-			}
-		}
-	case .EnterRoom:
-		resp := Join_Room_Response{}
-		parse_msg(msg, &resp)
-		game_state.is_trying_to_join_room = false
-		if resp.join {
-			game_state.is_room_master = resp.master == game_state.players[0].client_id
-			game_state.room_piece_count = i32(resp.piece_count)
-			game_state.room_ready_player_count = 0
-			game_state.room_player_count = 1
-			for p in resp.players {
-				if p.is_ready do game_state.room_ready_player_count += 1
-				idx := game_state.room_player_count
-				game_state.players[idx].client_id = strings.clone(p.client_id)
-				game_state.players[idx].name = strings.clone(p.name)
-				game_state.room_player_count += 1
-
-			}
-			game_state.screen_state = .Room
-			game_state.room_id = strings.clone(resp.room_id)
-		}
-	case .PlayerJoined:
-		resp := Player_Joined_Response{}
-		parse_msg(msg, &resp)
-		fmt.println("player joined...", resp)
-		if resp.client_id != game_state.players[0].client_id {
-			game_state.players[game_state.room_player_count].client_id = strings.clone(
-				resp.client_id,
+	{
+		@(static) scroll_idx: i32
+		data := make([^]cstring, game_state.log.len, context.temp_allocator)
+		for i in 0 ..< game_state.log.len {
+			data[i] = strings.clone_to_cstring(
+				queue.get(&game_state.log, i),
+				context.temp_allocator,
 			)
-			game_state.players[game_state.room_player_count].name = strings.clone(resp.name)
 		}
-		game_state.room_player_count += 1
-	case .KickPlayer:
-	case .Ready:
-		resp := Player_Ready_Response{}
-		parse_msg(msg, &resp)
-		fmt.println("ready", resp, game_state.players[0].client_id)
-		for i in 0 ..< MAX_PLAYER_COUNT {
-			if game_state.players[i].client_id == resp.player {
-				if i == 0 {
-					game_state.is_trying_to_change_ready_state = false
-				}
-				game_state.players[i].is_ready = resp.is_ready
-				break
-			}
-		}
-		if resp.is_ready {
-			game_state.room_ready_player_count += 1
-		} else {
-			game_state.room_ready_player_count -= 1
-		}
-	case .StartGame:
-		game_state.is_trying_to_start_game = false
-		resp := Start_Game_Response{}
-		parse_msg(msg, &resp)
-		if resp.should_start {
-			game_state.player_count = game_state.room_player_count
-			for i in 0 ..< game_state.player_count {
-				if game_state.players[i].client_id == resp.starting_player {
-					game_state.player_turn_index = i
-					break
-				}
-			}
-			game_state.screen_state = .GamePlay
-			game_state.current_action = .GameStarted
-		}
-	case .BeginTurn:
-		fmt.println("begin turn")
-		game_state.current_action = .BeginTurn
-	case .CanRoll:
-		fmt.println("can roll")
-		game_state.current_action = .CanRoll
-	case .BeginRoll:
-	case .EndRoll:
-		game_state.is_trying_to_roll = false
-		resp := End_Roll_Response{}
-		parse_msg(msg, &resp)
-		fmt.printf("end roll %d\n", resp.roll)
-		if resp.should_append {
-			append(&game_state.rolls, i32(resp.roll))
-		}
-	case .EndTurn:
-		fmt.println("end turn")
-		resp := End_Turn_Response{}
-		parse_msg(msg, &resp)
-		for idx in 0 ..< game_state.player_count {
-			if game_state.players[idx].client_id == resp.next_player {
-				game_state.player_turn_index = idx
-				break
-			}
-		}
-		resize(&game_state.rolls, 0)
-		game_state.current_action = .EndTurn
-	case .SelectingMove:
-		fmt.println("selecting move")
-		resp := Selecting_Move_Response{}
-		parse_msg(msg, &resp)
-		game_state.current_action = .SelectingMove
-	case .BeginMove:
-		resp := Begin_Move_Response{}
-		parse_msg(msg, &resp)
-		fmt.println(resp)
-		if resp.should_move {
-			game_state.target_piece = auto_cast resp.piece
-			game_state.target_move = Move {
-				roll   = auto_cast resp.roll,
-				cell   = resp.cell,
-				finish = resp.finished,
-			}
-			game_state.move_seq_idx = -1
-			game_state.target_position_percent = 0
-			game_state.current_action = .OnMove
-		} else {
-			game_state.current_action = .SelectingMove
-		}
-	case .EndMove:
-	case .EndGame:
-		resp := End_Game_Response{}
-		parse_msg(msg, &resp)
-		player_won_index := i32(-1)
-		for i in 0 ..< game_state.player_count {
-			if game_state.players[i].client_id == resp.winner {
-				player_won_index = i
-				break
-			}
-		}
-		assert(player_won_index == game_state.player_turn_index)
-		end_game(game_state)
-	case .ChangeName:
-		resp := Change_Name_Response{}
-		parse_msg(msg, &resp)
-		fmt.println(resp)
-		for i in 1 ..< game_state.player_count {
-			if game_state.players[i].client_id == resp.player {
-				if game_state.players[i].name != "" {
-					delete(game_state.players[i].name)
-					game_state.players[i].name = ""
-				}
-				game_state.players[i].name = strings.clone(resp.name)
-				break
-			}
-		}
+		temp := style
+		temp.font_size *= 0.75
+		set_ui_style(temp)
+		rl.GuiListViewEx(
+			draw_state.bottom_rect,
+			data,
+			auto_cast game_state.log.len,
+			&scroll_idx,
+			nil,
+			nil,
+		)
+		set_ui_style(style)
 	}
-}
-
-reset_net_state :: proc(game_state: ^Game_State) {
-	delete(game_state.players[0].client_id)
-	game_state.players[0].client_id = ""
-	game_state.players[0].is_ready = false
-	reset_room_state(game_state)
-}
-
-reset_room_state :: proc(game_state: ^Game_State) {
-	for i in 1 ..< MAX_PLAYER_COUNT {
-		game_state.players[i].is_ready = false
-
-		if game_state.players[i].client_id != "" {
-			delete(game_state.players[i].client_id)
-			game_state.players[i].client_id = ""
-		}
-
-		if game_state.players[i].name != "" {
-			delete(game_state.players[i].name)
-			game_state.players[i].name = ""
-		}
-	}
-
-	delete(game_state.room_id)
-	game_state.room_id = ""
-
-	game_state.is_room_master = false
-	game_state.room_player_count = 0
-	game_state.room_ready_player_count = 0
-	game_state.room_piece_count = 2
-	game_state.is_trying_to_connect = false
-	game_state.is_trying_to_kick_player_set = {}
-	game_state.is_trying_to_change_ready_state = false
-	game_state.is_trying_to_create_room = false
-	game_state.is_trying_to_join_room = false
-	game_state.is_trying_to_exit_room = false
-	game_state.is_trying_to_set_piece_count = false
-	game_state.is_trying_to_start_game = false
-	game_state.is_trying_to_roll = false
 }
