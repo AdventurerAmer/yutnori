@@ -159,7 +159,21 @@ func (g *GameInstance) Reset() {
 }
 
 func (g *GameInstance) Roll() (int, bool) {
-	n := rand.Intn(7) - 1
+	dist := []int{10, 10, 20, 20, 20, 10, 10}
+	space := []int{-1, 0, 1, 2, 3, 4, 5}
+
+	r := int(rand.Int31n(100))
+	acc := 0
+	idx := -1
+	for i := 0; i < len(dist); i++ {
+		acc += dist[i]
+		if r < acc {
+			idx = i
+			break
+		}
+	}
+	n := space[idx]
+
 	shouldAppend := true
 	if n == 0 {
 		shouldAppend = false
@@ -414,7 +428,7 @@ func (e EndMoveGameAction) Execute(c *Client, r *Room) {
 			if err != nil {
 				log.Println(err)
 			}
-			r.GameInstance.Players[r.GameInstance.PlayerTurnIdx].Client.Send(CallRollResponse{})
+			r.Broadcast(CallRollResponse{Player: r.GameInstance.Players[r.GameInstance.PlayerTurnIdx].Client.ID})
 			r.GameInstance.GameState = GameStateCanRoll
 		} else {
 			r.Broadcast(SelectingMoveResponse{Player: currentPlayer.Client.ID})
@@ -428,9 +442,9 @@ type ChangeNameGameAction struct {
 }
 
 func (cn ChangeNameGameAction) Execute(c *Client, r *Room) {
-	for _, p := range r.GameInstance.Players {
+	for idx, p := range r.GameInstance.Players {
 		if p.Client == c {
-			p.Name = cn.Name
+			r.GameInstance.Players[idx].Name = cn.Name
 			err := r.Broadcast(ChangeNameResponse{Player: c.ID, Name: cn.Name})
 			if err != nil {
 				log.Println(err)
@@ -438,7 +452,6 @@ func (cn ChangeNameGameAction) Execute(c *Client, r *Room) {
 			break
 		}
 	}
-	log.Println("broadcasting...", cn.Name)
 }
 
 func getNextCell(id CellID, AtStartPosition bool) (CellID, bool) {

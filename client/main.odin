@@ -238,8 +238,24 @@ end_turn :: proc(game_state: ^Game_State) {
 	log(game_state, "turn ended")
 }
 
+
 roll :: proc(game_state: ^Game_State) -> i32 {
-	n := rand.int31_max(7) - 1
+	dist := []int{10, 10, 20, 20, 20, 10, 10}
+	space := []int{-1, 0, 1, 2, 3, 4, 5}
+
+	r := int(rand.int31_max(100))
+	acc := 0
+	idx := -1
+	for i in 0 ..< len(dist) {
+		acc += dist[i]
+		if r < acc {
+			idx = i
+			break
+		}
+	}
+	assert(idx != -1)
+	n := space[idx]
+
 	should_append := true
 	if n == 0 {
 		should_append = false
@@ -257,9 +273,9 @@ roll :: proc(game_state: ^Game_State) -> i32 {
 		should_append = false
 	}
 	if should_append {
-		append(&game_state.rolls, n)
+		append(&game_state.rolls, auto_cast n)
 	}
-	return n
+	return auto_cast n
 }
 
 can_roll :: proc(game_state: ^Game_State) {
@@ -579,7 +595,7 @@ main :: proc() {
 	defer deinit_game(game_state)
 
 	if game_state.players[0].name == "" {
-		game_state.players[0].name = strings.clone("Harlequin", context.allocator)
+		game_state.players[0].name = strings.clone(rand.choice(random_names), context.allocator)
 	}
 
 	font := rl.GetFontDefault()
