@@ -2,8 +2,7 @@
 
 ## Description
 
-	[yutnori](https://en.wikipedia.org/wiki/Yunnori) is a traditional korean board game
-  usually played during the new year.
+[yutnori](https://en.wikipedia.org/wiki/Yunnori) is a traditional Korean board game usually played during the new year.
 
 ## Features
 
@@ -13,12 +12,12 @@
 
 ## Usage
 
-run the server
+Run the server
 ```bash
   make run_server
 ```
 
-run the client
+Run the client
 ```bash
   make run_client
 ```
