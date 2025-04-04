@@ -109,8 +109,7 @@ func (c *Client) WriteLoop(hub *Hub) {
 		case <-c.ExitRoomCh:
 			setRoom(c, nil)
 		case <-timer.C:
-			k := KeepAliveMessage{}
-			msg, err := SerializeMessage(k)
+			msg, err := SerializeMessage(KeepAliveMessage{})
 			if err != nil {
 				log.Println(err)
 				return

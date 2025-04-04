@@ -2,7 +2,8 @@
 
 ## Description
 
-	[yutnori](https://en.wikipedia.org/wiki/Yunnori) is a traditional korean board game usually played during the new year.
+	[yutnori](https://en.wikipedia.org/wiki/Yunnori) is a traditional korean board game
+  usually played during the new year.
 
 ## Features
 
