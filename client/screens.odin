@@ -26,7 +26,6 @@ draw_main_menu_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 
 	padding := Vec2{0.01, 0.01} * screen_size
 	play_id := push_widget(&layout, "PLAY", padding)
-	options_id := push_widget(&layout, "OPTIONS", padding)
 	quit_id := push_widget(&layout, "QUIT", padding)
 
 	end_vertical_layout(&layout, ui_points.center)
@@ -35,12 +34,6 @@ draw_main_menu_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 		w := get_widget(layout, play_id)
 		if rl.GuiButton(w.rect, w.text) {
 			game_state.screen_state = .GameModes
-		}
-	}
-
-	{
-		w := get_widget(layout, options_id)
-		if rl.GuiButton(w.rect, w.text) {
 		}
 	}
 
@@ -293,7 +286,7 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 		layout.style = style
 
 		room_label_id := push_widget(&layout, "ROOM", padding)
-		room_id_text := fmt.ctprintf("%s", game_state.room_id)
+		room_id_text := fmt.ctprintf("%s (CLICK TO COPY)", game_state.room_id)
 		room_id := push_widget(&layout, room_id_text, padding)
 
 		push_widget(&layout, "", padding)
@@ -338,7 +331,7 @@ draw_room_screen :: proc(game_state: ^Game_State, style: UI_Style) {
 		{
 			w := get_widget(layout, room_id)
 			if rl.GuiLabelButton(w.rect, w.text) {
-				rl.SetClipboardText(room_id_text)
+				rl.SetClipboardText(fmt.ctprintf("%s", game_state.room_id))
 			}
 		}
 

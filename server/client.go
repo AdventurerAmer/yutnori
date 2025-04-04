@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 )
 
 type ClientID string
@@ -91,6 +92,7 @@ func (c *Client) WriteLoop(hub *Hub) {
 			room.Exit(c.ID, false)
 		}
 	}()
+	timer := time.NewTimer(time.Minute)
 	for {
 		select {
 		case msg, ok := <-c.SendCh:
@@ -106,6 +108,18 @@ func (c *Client) WriteLoop(hub *Hub) {
 			setRoom(c, room)
 		case <-c.ExitRoomCh:
 			setRoom(c, nil)
+		case <-timer.C:
+			k := KeepAliveMessage{}
+			msg, err := SerializeMessage(k)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			err = writeMessage(c.Conn, msg)
+			if err != nil {
+				log.Println(err)
+				return
+			}
 		}
 	}
 }
@@ -161,7 +175,6 @@ func handleMessage(c *Client, hub *Hub, msg Message) {
 			return
 		}
 		hub.EnterRoom(c, req.Name, req.RoomID)
-		log.Println("player joined", req)
 	case MessageTypePlayerReady:
 		req := struct {
 			IsReady bool `json:"is_ready"`

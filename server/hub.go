@@ -57,17 +57,19 @@ func (h *Hub) HandleClients() {
 			h.Rooms[room.ID] = room
 			params.Client.EnterRoom(room)
 			go room.ReadLoop(h)
-			log.Printf("hub created room '%s'\n", room.ID)
+			log.Printf("created room '%s'\n", room.ID)
 		case params := <-h.EnterRoomCh:
 			client := params.Client
 			room := h.Rooms[params.Room]
-			if room != nil {
+			log.Printf("client '%s' wants to enter room '%s'\n", client.ID, params.Room)
+			if room == nil {
+				client.Send(JoinRoomResponse{})
+			} else {
 				room.Enter(client, params.ClientName)
-				log.Printf("client '%s' wants to enter room '%s'\n", client.ID, room.ID)
 			}
 		case room := <-h.DestroyRoomCh:
 			delete(h.Rooms, room.ID)
-			log.Printf("hub destroyed room '%s'\n", room.ID)
+			log.Printf("destroyed room '%s'\n", room.ID)
 		}
 	}
 }

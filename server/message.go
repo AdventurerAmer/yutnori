@@ -45,6 +45,12 @@ type MessageSerializer interface {
 	Kind() MessageType
 }
 
+type KeepAliveMessage struct{}
+
+func (k KeepAliveMessage) Kind() MessageType {
+	return MessageTypeKeepalive
+}
+
 type ConnectResponse struct {
 	ClientID ClientID `json:"client_id"`
 }

@@ -708,6 +708,7 @@ handle_net_responses :: proc(game_state: ^Game_State) {
 	}
 	switch msg.kind {
 	case .Keepalive:
+		fmt.println("keep alive...")
 	case .Connect:
 		game_state.is_trying_to_connect = false
 		resp := Connect_Response{}
